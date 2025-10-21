@@ -5,7 +5,7 @@
 *             @projectcalico/core-maintainers
 
 # The docs team will be the default owners for the docs directory.
-calico/*       @docs
+calico/*       @projectcalico/docs
 
 # Changes that affect releasing should be on the radar of the release team.
 manifests/*   @projectcalico/release-team
