@@ -1099,15 +1099,14 @@ Additional links:
 	releaseNote := replacer.Replace(releaseNoteTemplate)
 
 	args := []string{
-		"-username", r.githubOrg,
-		"-repository", r.repo,
-		"-name", r.calicoVersion,
-		"-body", releaseNote,
-		"-draft",
-		r.calicoVersion,
-		r.uploadDir(),
+		"release", "create", r.calicoVersion,
+		fmt.Sprintf("%s/*", r.uploadDir()),
+		"--draft",
+		"--notes", releaseNote,
+		"--title", r.calicoVersion,
+		"--repo", fmt.Sprintf("%s/%s", r.githubOrg, r.repo),
 	}
-	_, err := r.runner.RunInDir(r.repoRoot, "./bin/ghr", args, nil)
+	_, err := r.runner.RunInDir(r.repoRoot, "./bin/gh", args, nil)
 	if err != nil {
 		return fmt.Errorf("failed to publish github release: %w", err)
 	}
