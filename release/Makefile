@@ -63,3 +63,14 @@ hashrelease-svr-gc: bin/release
 .PHONY: release-notes
 release-notes: bin/release var-require-all-GITHUB_TOKEN
 	@bin/release release generate-release-notes
+
+GH_TEAM = release-team
+check-release-prereq: var-require-all-CI-GITHUB_TOKEN-CI_USER
+ifneq ($(CI), true)
+	$(error This target should only be run in CI)
+endif
+# Check if the user is an active member of the release team in the organization
+ifneq ($(shell gh api --method GET -H "Accept: application/vnd.github.v3+json" \
+	/orgs/$(ORGANIZATION)/teams/${GH_TEAM}/memberships/${CI_USER} --jq '.state' 2>/dev/null), active)
+	$(error User '$(CI_USER)' is not an active member of the '$(GH_TEAM)' team in the '$(ORGANIZATION)' organization)
+endif
