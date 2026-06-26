@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cast"
@@ -25,6 +26,13 @@ func chartURLs(githubOrg, githubRepo, version string) []string {
 		urls = append(urls, u)
 	}
 	return urls
+}
+
+// ociVersion is the strict-semver chart version (no "v" prefix) used as the
+// OCI tag. The GitHub-release filename and index URL keep the "v" prefix; the
+// OCI tag and the OCI-pulled filename do not. See issue #12826.
+func ociVersion() string {
+	return strings.TrimPrefix(releaseVersion, "v")
 }
 
 func TestHelmChart(t *testing.T) {
@@ -60,16 +68,29 @@ func TestHelmChart(t *testing.T) {
 			t.Run(reg, func(t *testing.T) {
 				t.Parallel()
 
+				// Regression for #12826: with no --version, Helm must resolve
+				// the latest tag. This only works if the OCI tag is strict
+				// semver (no "v" prefix).
+				noVerDir := t.TempDir()
+				noVerArgs := []string{
+					"pull", fmt.Sprintf("oci://%s/%s", reg, utils.TigeraOperatorChart),
+				}
+				if out, err := command.RunInDir(noVerDir, "helm", noVerArgs); err != nil {
+					t.Fatalf("pull %s helm chart (no --version) from %s: %v\nOutput: %s", utils.TigeraOperatorChart, reg, err, out)
+				}
+
+				// Explicit --version uses the strict-semver tag, and the pulled
+				// file is named by the chart's internal (stripped) version.
 				dir := t.TempDir()
 				args := []string{
 					"pull", fmt.Sprintf("oci://%s/%s", reg, utils.TigeraOperatorChart),
-					"--version", releaseVersion,
+					"--version", ociVersion(),
 				}
 				out, err := command.RunInDir(dir, "helm", args)
 				if err != nil {
-					t.Fatalf("pull %s %s helm chart from %s: %v\nOutput: %s", utils.TigeraOperatorChart, releaseVersion, reg, err, out)
+					t.Fatalf("pull %s %s helm chart from %s: %v\nOutput: %s", utils.TigeraOperatorChart, ociVersion(), reg, err, out)
 				}
-				chart, err := loader.Load(filepath.Join(dir, fmt.Sprintf("%s-%s.tgz", utils.TigeraOperatorChart, releaseVersion)))
+				chart, err := loader.Load(filepath.Join(dir, fmt.Sprintf("%s-%s.tgz", utils.TigeraOperatorChart, ociVersion())))
 				if err != nil {
 					t.Fatalf("load helm chart from %s: %v", reg, err)
 				}
@@ -123,20 +144,20 @@ func TestHelmIndex(t *testing.T) {
 	}
 	filteredEntries := slices.Collect(func(yield func(map[string]any) bool) {
 		for _, entry := range tigeraOperatorEntries {
-			if entry["version"].(string) == releaseVersion {
+			if entry["version"].(string) == ociVersion() {
 				yield(entry)
 			}
 		}
 	})
 	if len(filteredEntries) == 0 {
-		t.Fatalf("helm index does not contain tigera-operator entry for version %s", releaseVersion)
+		t.Fatalf("helm index does not contain tigera-operator entry for version %s", ociVersion())
 	} else if len(filteredEntries) > 1 {
-		t.Fatalf("helm index contains multiple tigera-operator entries for version %s", releaseVersion)
+		t.Fatalf("helm index contains multiple tigera-operator entries for version %s", ociVersion())
 	}
 	helmEntry := filteredEntries[0]
 	urls, ok := helmEntry["urls"]
 	if !ok || len(urls.([]any)) == 0 {
-		t.Fatalf("helm index entry for version %s does not contain urls", releaseVersion)
+		t.Fatalf("helm index entry for version %s does not contain urls", ociVersion())
 	}
 
 	for _, url := range chartURLs(githubOrg, githubRepo, releaseVersion) {
