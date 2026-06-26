@@ -152,6 +152,13 @@ bin/send-perf-results: $(shell find ./hack/perf -name '*.go')
 
 CHART_DESTINATION ?= ./bin
 
+# Helm derives the OCI chart tag from the chart's internal version, and Helm's
+# OCI client only resolves tags that parse as strict semver (no "v" prefix).
+# Package charts with the stripped version so the OCI tag is e.g. 3.32.0, then
+# rename the artifact back to the v-prefixed filename used by the GitHub release
+# and the classic helm index. See https://github.com/projectcalico/calico/issues/12826
+CHART_VERSION := $(GIT_VERSION:v%=%)
+
 # Build helm charts.
 chart: $(CHART_DESTINATION)/tigera-operator-$(GIT_VERSION).tgz \
 			 $(CHART_DESTINATION)/projectcalico.org.v3-$(GIT_VERSION).tgz \
@@ -161,22 +168,25 @@ $(CHART_DESTINATION)/tigera-operator-$(GIT_VERSION).tgz: bin/helm $(shell find .
 	mkdir -p $(CHART_DESTINATION)
 	bin/helm package ./charts/tigera-operator \
 	--destination $(CHART_DESTINATION)/ \
-	--version $(GIT_VERSION) \
+	--version $(CHART_VERSION) \
 	--app-version $(GIT_VERSION)
+	mv $(CHART_DESTINATION)/tigera-operator-$(CHART_VERSION).tgz $@
 
 $(CHART_DESTINATION)/crd.projectcalico.org.v1-$(GIT_VERSION).tgz: bin/helm $(shell find ./charts/crd.projectcalico.org.v1/ -type f)
 	mkdir -p $(CHART_DESTINATION)
 	bin/helm package ./charts/crd.projectcalico.org.v1/ \
 	--destination $(CHART_DESTINATION)/ \
-	--version $(GIT_VERSION) \
+	--version $(CHART_VERSION) \
 	--app-version $(GIT_VERSION)
+	mv $(CHART_DESTINATION)/crd.projectcalico.org.v1-$(CHART_VERSION).tgz $@
 
 $(CHART_DESTINATION)/projectcalico.org.v3-$(GIT_VERSION).tgz: bin/helm $(shell find ./charts/projectcalico.org.v3/ -type f)
 	mkdir -p $(CHART_DESTINATION)
 	bin/helm package ./charts/projectcalico.org.v3/ \
 	--destination $(CHART_DESTINATION)/ \
-	--version $(GIT_VERSION) \
+	--version $(CHART_VERSION) \
 	--app-version $(GIT_VERSION)
+	mv $(CHART_DESTINATION)/projectcalico.org.v3-$(CHART_VERSION).tgz $@
 
 ###############################################################################
 # Build & push workflow — build all images, tag with a custom tag, and
