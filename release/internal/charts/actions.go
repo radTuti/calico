@@ -34,7 +34,7 @@ import (
 
 // Build packages every chart the release ships.
 func Build(chart Chart, opts ...BuildOption) error {
-	s, err := newSettings(buildStep, chart, opts)
+	s, err := newSettings(buildStep, chart, opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func Build(chart Chart, opts ...BuildOption) error {
 
 // Publish pushes every built chart to every registry. confirm latches the push.
 func Publish(chart Chart, registries []string, confirm bool, opts ...PublishOption) error {
-	s, err := newSettings(PublishStep, chart, opts)
+	s, err := newSettings(PublishStep, chart, opts, PublishOption.applyPublish)
 	if err != nil {
 		return err
 	}
@@ -116,14 +116,14 @@ func Publish(chart Chart, registries []string, confirm bool, opts ...PublishOpti
 	return nil
 }
 
-func newSettings[O any](step string, chart Chart, opts []O) (settings, error) {
+func newSettings[O any](step string, chart Chart, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{Chart: chart}
 	s.Apply([]steps.Option{steps.WithName(step), steps.WithDir(chart.RepoRoot)})
 	if err := s.validate(); err != nil {
 		return s, s.Errorf("%w", err)
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
@@ -133,16 +133,6 @@ func newSettings[O any](step string, chart Chart, opts []O) (settings, error) {
 	return s, nil
 }
 
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	case PublishOption:
-		return o.applyPublish(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
-}
 
 func (s settings) build() error {
 	if err := os.MkdirAll(s.BaseDir, utils.DirPerms); err != nil {

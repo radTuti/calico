@@ -16,7 +16,6 @@ package operator
 
 import (
 	"errors"
-	"fmt"
 	"maps"
 	"os"
 	"slices"
@@ -31,7 +30,7 @@ import (
 )
 
 func Build(o Operator, variants []Variant, hashrelease bool, opts ...BuildOption) error {
-	s, err := newSettings(buildStep, o, validateBuild(hashrelease), opts)
+	s, err := newSettings(buildStep, o, validateBuild(hashrelease), opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -44,7 +43,7 @@ func Build(o Operator, variants []Variant, hashrelease bool, opts ...BuildOption
 }
 
 func Publish(o Operator, variants []Variant, hashrelease bool, opts ...PublishOption) error {
-	s, err := newSettings(PublishStep, o, validatePublish, opts)
+	s, err := newSettings(PublishStep, o, validatePublish, opts, PublishOption.applyPublish)
 	if err != nil {
 		return err
 	}
@@ -78,7 +77,7 @@ func Publish(o Operator, variants []Variant, hashrelease bool, opts ...PublishOp
 // Resolve records an operator an earlier run published. Only the first
 // registry must hold each variant's release tag.
 func Resolve(o Operator, variants []Variant, opts ...ResolveOption) error {
-	s, err := newSettings(ResolveStep, o, validateResolve, opts)
+	s, err := newSettings(ResolveStep, o, validateResolve, opts, ResolveOption.applyResolve)
 	if err != nil {
 		return err
 	}
@@ -107,7 +106,7 @@ func Resolve(o Operator, variants []Variant, opts ...ResolveOption) error {
 }
 
 func PublishBranchTag(o Operator, variants []Variant, branch string, opts ...PublishOption) error {
-	s, err := newSettings(branchStep, o, validateBranch, opts)
+	s, err := newSettings(branchStep, o, validateBranch, opts, PublishOption.applyPublish)
 	if err != nil {
 		return err
 	}
@@ -314,29 +313,16 @@ func (s settings) preBuildValidation() error {
 	return nil
 }
 
-func newSettings[O any](step string, o Operator, validate func(Operator) error, opts []O) (settings, error) {
+func newSettings[O any](step string, o Operator, validate func(Operator) error, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{Operator: o, validate: true}
 	s.Apply([]steps.Option{steps.WithName(step), steps.WithDir(Dir(o))})
 	if err := validate(o); err != nil {
 		return s, s.Errorf("%w", err)
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s, nil
-}
-
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	case PublishOption:
-		return o.applyPublish(s)
-	case ResolveOption:
-		return o.applyResolve(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
 }

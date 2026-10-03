@@ -31,7 +31,7 @@ import (
 )
 
 func Build(repoRoot, version string, variants []Variant, opts ...BuildOption) error {
-	s, err := newSettings(buildStep, repoRoot, version, variants, opts)
+	s, err := newSettings(buildStep, repoRoot, version, variants, opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (a archiver) Name() string {
 }
 
 func (a archiver) Contribute(dir string) error {
-	s, err := newSettings(archiveStep, a.RepoRoot, a.Version, a.Variants, a.Options)
+	s, err := newSettings(archiveStep, a.RepoRoot, a.Version, a.Variants, a.Options, ArchiveOption.applyArchive)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ var publishEnv = func(s settings) []string {
 // confirm latches the push: without it the make targets run as a dry run, so it
 // is an argument rather than an option a caller can forget.
 func Publish(repoRoot, version string, variants []Variant, confirm bool, resolve steps.DigestResolver, opts ...PublishOption) error {
-	s, err := newSettings(PublishStep, repoRoot, version, variants, opts)
+	s, err := newSettings(PublishStep, repoRoot, version, variants, opts, PublishOption.applyPublish)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func Publish(repoRoot, version string, variants []Variant, confirm bool, resolve
 // Resolve records already published images a release uses.
 // A missing image fails only once the rest are recorded.
 func Resolve(repoRoot, version string, variants []Variant, resolve steps.DigestResolver, opts ...ResolveOption) error {
-	s, err := newSettings(ResolveStep, repoRoot, version, variants, opts)
+	s, err := newSettings(ResolveStep, repoRoot, version, variants, opts, ResolveOption.applyResolve)
 	if err != nil {
 		return err
 	}
@@ -269,7 +269,7 @@ func sendImagesToISS(s settings, unscanned []string) {
 }
 
 // newSettings is generic so each step accepts only its own option type.
-func newSettings[O any](step, repoRoot, version string, variants []Variant, opts []O) (settings, error) {
+func newSettings[O any](step, repoRoot, version string, variants []Variant, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{RepoRoot: repoRoot, Version: version, Variants: variants}
 	s.Apply([]steps.Option{steps.WithName(step)})
 	errs := []error{s.validate()}
@@ -284,27 +284,13 @@ func newSettings[O any](step, repoRoot, version string, variants []Variant, opts
 		return s, s.Errorf("%w", err)
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s.defaults(), nil
 }
 
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	case ArchiveOption:
-		return o.applyArchive(s)
-	case PublishOption:
-		return o.applyPublish(s)
-	case ResolveOption:
-		return o.applyResolve(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
-}
 
 // unitStateAgainst binds one record, so every unit is judged against the same.
 func (s settings) unitStateAgainst(recorded steps.RecordedDigests) func(unit) (bool, error) {

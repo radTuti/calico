@@ -33,7 +33,7 @@ func Build(repoRoot, version string, builders []Builder, opts ...BuildOption) er
 	if len(builders) == 0 {
 		return nil
 	}
-	s, err := newSettings(buildStep, repoRoot, version, opts)
+	s, err := newSettings(buildStep, repoRoot, version, opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -112,27 +112,18 @@ func Archive(repoRoot string) []archives.Contributor {
 	return out
 }
 
-func newSettings[O any](step, repoRoot, version string, opts []O) (settings, error) {
+func newSettings[O any](step, repoRoot, version string, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{RepoRoot: repoRoot, Version: version}
 	s.Apply([]steps.Option{steps.WithName(step), steps.WithDir(repoRoot)})
 	if repoRoot == "" {
 		return s, s.Errorf("no repository root specified")
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s, nil
-}
-
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
 }
 
 func (s settings) env() []string {

@@ -17,7 +17,6 @@ package distribution
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -30,7 +29,7 @@ import (
 const filePerms = 0o644
 
 func BuildMetadata(a Attester, dir string, opts ...MetadataOption) error {
-	s, err := newSettings(metadataStep, opts)
+	s, err := newSettings(metadataStep, opts, MetadataOption.applyMetadata)
 	if err != nil {
 		return err
 	}
@@ -54,7 +53,7 @@ func BuildMetadata(a Attester, dir string, opts ...MetadataOption) error {
 }
 
 func Publish(pipeline []Upload, opts ...PublishOption) error {
-	s, err := newSettings(artifactsStep, opts)
+	s, err := newSettings(artifactsStep, opts, PublishOption.applyPublish)
 	if err != nil {
 		return err
 	}
@@ -131,24 +130,13 @@ func (s settings) publishOne(u Upload) error {
 	}
 }
 
-func newSettings[O any](step string, opts []O) (settings, error) {
+func newSettings[O any](step string, opts []O, apply func(O, *settings) error) (settings, error) {
 	var s settings
 	s.Apply([]steps.Option{steps.WithName(step)})
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s, nil
-}
-
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case PublishOption:
-		return o.applyPublish(s)
-	case MetadataOption:
-		return o.applyMetadata(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
 }

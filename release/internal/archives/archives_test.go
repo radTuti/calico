@@ -478,28 +478,6 @@ func TestBuildWindowsClearsAStaleInstallScript(t *testing.T) {
 	}
 }
 
-// An option that only implements WindowsOption must still reach the verb.
-// WithRunner and WithLogsDir satisfy both interfaces, so they would pass even
-// if applyTo had no Windows arm.
-type windowsOnlyOption func(*settings) error
-
-func (f windowsOnlyOption) applyWindows(s *settings) error { return f(s) }
-
-func TestWindowsOnlyOptionsAreApplied(t *testing.T) {
-	var applied bool
-	opt := windowsOnlyOption(func(*settings) error {
-		applied = true
-		return nil
-	})
-	w, runner := windowsFixture(t)
-	if err := BuildWindows(w, WithRunner(runner), opt); err != nil {
-		t.Fatalf("BuildWindows() = %v", err)
-	}
-	if !applied {
-		t.Error("a Windows-only option was not applied")
-	}
-}
-
 func TestBuildWindowsValidates(t *testing.T) {
 	out := testOutputDir(t)
 	// The message is asserted, not just that it failed: without a repo root the

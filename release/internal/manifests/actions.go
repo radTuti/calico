@@ -28,7 +28,7 @@ import (
 )
 
 func Build(m Manifests, generate, ocpBundle bool, opts ...BuildOption) error {
-	s, err := newSettings(buildStep, m, validateFor(generate), opts)
+	s, err := newSettings(buildStep, m, validateFor(generate), opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -143,7 +143,7 @@ func Registry(root string) (string, error) {
 }
 
 func AssertVersions(m Manifests, opts ...AssertOption) error {
-	s, err := newSettings(assertStep, m, validateAssert, opts)
+	s, err := newSettings(assertStep, m, validateAssert, opts, AssertOption.applyAssert)
 	if err != nil {
 		return err
 	}
@@ -180,27 +180,17 @@ func (s settings) assertImage(file, img string) error {
 	return nil
 }
 
-func newSettings[O any](step string, m Manifests, validate func(Manifests) error, opts []O) (settings, error) {
+func newSettings[O any](step string, m Manifests, validate func(Manifests) error, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{Manifests: m}
 	s.Apply([]steps.Option{steps.WithName(step), steps.WithDir(m.RepoRoot)})
 	if err := validate(m); err != nil {
 		return s, s.Errorf("%w", err)
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s, nil
 }
 
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	case AssertOption:
-		return o.applyAssert(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
-}

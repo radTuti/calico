@@ -38,7 +38,7 @@ func beforeBuild(a Archive) (cleanupFn func() error, err error) {
 }
 
 func Build(a Archive, opts ...BuildOption) error {
-	s, err := newSettings(buildStep, a, validateSources, opts)
+	s, err := newSettings(buildStep, a, validateSources, opts, BuildOption.applyBuild)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (s settings) tar(staging string) error {
 // BuildWindows builds the Windows archive and its install script into the
 // output directory, beside the release tarball rather than inside it.
 func BuildWindows(a Archive, opts ...WindowsOption) error {
-	s, err := newSettings(windowsStep, a, validateWindows, opts)
+	s, err := newSettings(windowsStep, a, validateWindows, opts, WindowsOption.applyWindows)
 	if err != nil {
 		return err
 	}
@@ -126,27 +126,17 @@ func BuildWindows(a Archive, opts ...WindowsOption) error {
 	return nil
 }
 
-func newSettings[O any](step string, a Archive, validate func(a Archive) error, opts []O) (settings, error) {
+func newSettings[O any](step string, a Archive, validate func(a Archive) error, opts []O, apply func(O, *settings) error) (settings, error) {
 	s := settings{Archive: a}
 	s.Apply([]steps.Option{steps.WithName(step)})
 	if err := validate(a); err != nil {
 		return s, s.Errorf("%w", err)
 	}
 	for _, opt := range opts {
-		if err := applyTo(opt, &s); err != nil {
+		if err := apply(opt, &s); err != nil {
 			return s, s.Errorf("%w", err)
 		}
 	}
 	return s, nil
 }
 
-func applyTo(opt any, s *settings) error {
-	switch o := opt.(type) {
-	case BuildOption:
-		return o.applyBuild(s)
-	case WindowsOption:
-		return o.applyWindows(s)
-	default:
-		return fmt.Errorf("unknown option type %T", opt)
-	}
-}
