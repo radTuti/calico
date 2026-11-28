@@ -311,8 +311,8 @@ func TestCreateBranch(t *testing.T) {
 	if err := createBranch(command.Git(g), testPrefix+"-v3.33-2", testPrefix+"-v3.33-1"); err != nil {
 		t.Fatal(err)
 	}
-	if diff := cmp.Diff([]string{"branch", testPrefix + "-v3.33-2", testPrefix + "-v3.33-1"}, gitArgs(g)[0]); diff != "" {
-		t.Fatalf("gitArgs(g)[0] (-want +got):\n%s", diff)
+	if diff := cmp.Diff([][]string{{"branch", testPrefix + "-v3.33-2", testPrefix + "-v3.33-1"}}, gitArgs(g)); diff != "" {
+		t.Fatalf("git calls (-want +got):\n%s", diff)
 	}
 }
 
@@ -320,30 +320,29 @@ func TestTagWithEmptyCommit(t *testing.T) {
 	branch := testPrefix + "-v3.33-2"
 	tag := "v3.33.0-2.0-" + testSuffix
 
-	g := &command.Recorder{}
-	if err := tagWithEmptyCommit(command.Git(g), branch, tag); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(g.Calls()); got != 3 {
-		t.Fatalf("len(g.Calls()) = %d, want %d", got, 3)
-	}
-	if diff := cmp.Diff([]string{"checkout", branch}, gitArgs(g)[0]); diff != "" {
-		t.Fatalf("gitArgs(g)[0] (-want +got):\n%s", diff)
-	}
-	if diff := cmp.Diff([]string{"commit", "--allow-empty", "-m", "Begin development for " + tag}, gitArgs(g)[1]); diff != "" {
-		t.Fatalf("gitArgs(g)[1] (-want +got):\n%s", diff)
-	}
-	if diff := cmp.Diff([]string{"tag", "-f", "--no-sign", tag}, gitArgs(g)[2]); diff != "" {
-		t.Fatalf("gitArgs(g)[2] (-want +got):\n%s", diff)
-	}
+	t.Run("commits and tags on the branch", func(t *testing.T) {
+		g := &command.Recorder{}
+		if err := tagWithEmptyCommit(command.Git(g), branch, tag); err != nil {
+			t.Fatal(err)
+		}
+		want := [][]string{
+			{"checkout", branch},
+			{"commit", "--allow-empty", "-m", "Begin development for " + tag},
+			{"tag", "-f", "--no-sign", tag},
+		}
+		if diff := cmp.Diff(want, gitArgs(g)); diff != "" {
+			t.Fatalf("git calls (-want +got):\n%s", diff)
+		}
+	})
 
-	// checkout fails -> wrapped error naming the branch, no further git calls.
-	g2 := fakeRunner(firstTwo, nil, map[string]error{"checkout " + branch: errFake})
-	err := tagWithEmptyCommit(command.Git(g2), branch, tag)
-	if err == nil || !strings.Contains(err.Error(), branch) {
-		t.Fatalf("err = %v, want it to contain %q", err, branch)
-	}
-	if got := len(g2.Calls()); got != 1 {
-		t.Fatalf("len(g2.Calls()) = %d, want %d", got, 1)
-	}
+	t.Run("a failed checkout names the branch and stops", func(t *testing.T) {
+		g := fakeRunner(firstTwo, nil, map[string]error{"checkout " + branch: errFake})
+		err := tagWithEmptyCommit(command.Git(g), branch, tag)
+		if err == nil || !strings.Contains(err.Error(), branch) {
+			t.Fatalf("err = %v, want it to contain %q", err, branch)
+		}
+		if got := len(g.Calls()); got != 1 {
+			t.Fatalf("ran %d git calls, want 1", got)
+		}
+	})
 }

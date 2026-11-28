@@ -172,43 +172,17 @@ func (r *CalicoManager) PrepareRelease() error {
 	if err != nil {
 		return err
 	}
-	ver := r.calicoVersion.String()
-	msg := fmt.Sprintf("build: %s release", ver)
-	trailer := gitTrailerReleaseBranch + ": " + base
-	core, err := r.branchDriver().Prep(branch.Prep{
-		Base:          base,
-		Branch:        r.prepBranchName(),
-		CommitMessage: msg,
-		Trailers:      []string{trailer},
-		Edit: func() ([]string, error) {
-			if err := r.modifyHelmChartsValues(ver, r.operatorVersion); err != nil {
-				return nil, fmt.Errorf("failed to update chart versions: %w", err)
-			}
-			if _, err := command.Make(r.runner, r.repoRoot).Run([]string{"generate"}); err != nil {
-				return nil, fmt.Errorf("failed to run make generate: %w", err)
-			}
-			// git add fails on a missing path, and the notes dir is absent until
-			// the first notes are written.
-			var paths []string
-			for _, p := range prepStagedPaths(r.repoRoot) {
-				if _, err := os.Stat(p); err == nil {
-					paths = append(paths, p)
-				} else if !errors.Is(err, fs.ErrNotExist) {
-					return nil, err
-				}
-			}
-			return paths, nil
-		},
-	})
+	spec := r.prepSpec(base)
+	core, err := r.branchDriver().Prep(spec)
 	if err != nil {
 		return err
 	}
 	pr := github.PullRequest{
 		Repo:   r.repo,
 		Base:   base,
-		Head:   r.prepBranchName(),
-		Title:  msg,
-		Body:   trailer,
+		Head:   spec.Branch,
+		Title:  spec.CommitMessage,
+		Body:   spec.Trailers[0],
 		Local:  r.planOptions.Local,
 		Runner: r.runner,
 	}
@@ -239,6 +213,35 @@ func (r *CalicoManager) PrepareRelease() error {
 		Done: pr.Opened,
 	}}
 	return r.runPlan(slices.Concat(before, core, after))
+}
+
+func (r *CalicoManager) prepSpec(base string) branch.Prep {
+	ver := r.calicoVersion.String()
+	return branch.Prep{
+		Base:          base,
+		Branch:        r.prepBranchName(),
+		CommitMessage: fmt.Sprintf("build: %s release", ver),
+		Trailers:      []string{gitTrailerReleaseBranch + ": " + base},
+		Edit: func() ([]string, error) {
+			if err := r.modifyHelmChartsValues(ver, r.operatorVersion); err != nil {
+				return nil, fmt.Errorf("failed to update chart versions: %w", err)
+			}
+			if _, err := command.Make(r.runner, r.repoRoot).Run([]string{"generate"}); err != nil {
+				return nil, fmt.Errorf("failed to run make generate: %w", err)
+			}
+			// git add fails on a missing path, and the notes dir is absent until
+			// the first notes are written.
+			var paths []string
+			for _, p := range prepStagedPaths(r.repoRoot) {
+				if _, err := os.Stat(p); err == nil {
+					paths = append(paths, p)
+				} else if !errors.Is(err, fs.ErrNotExist) {
+					return nil, err
+				}
+			}
+			return paths, nil
+		},
+	}
 }
 
 func (r *CalicoManager) prepBranchName() string {

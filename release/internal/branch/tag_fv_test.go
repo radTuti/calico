@@ -78,10 +78,10 @@ func TestCutFromTag(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(released, strings.TrimSpace(parent)); diff != "" {
-			t.Fatalf("strings.TrimSpace(parent) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("tag commit parent (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff("Updates for "+derived+" release branch", gitHeadSubject(t, root, derived)); diff != "" {
-			t.Fatalf("gitHeadSubject(t, root, derived) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("head subject (-want +got):\n%s", diff)
 		}
 
 		// It is on the remote; main is untouched and no dev tag was made.
@@ -94,7 +94,7 @@ func TestCutFromTag(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(strings.TrimSpace(local), strings.TrimSpace(onRemote)); diff != "" {
-			t.Fatalf("strings.TrimSpace(onRemote) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("remote tag (-want +got):\n%s", diff)
 		}
 		mainAfter, err := realGit(root).Run("rev-parse", "master")
 		if err != nil {
@@ -108,7 +108,7 @@ func TestCutFromTag(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff("v3.23.1", strings.TrimSpace(tags)); diff != "" {
-			t.Fatalf("strings.TrimSpace(tags) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("tags (-want +got):\n%s", diff)
 		}
 	})
 
@@ -134,7 +134,7 @@ func TestCutFromTag(t *testing.T) {
 		}
 
 		if branchExists(t, realGit(root), "release-v3.23.1-hotfix") {
-			t.Fatal("localBranchExists(realGit(root), \"release-v3.23.1-hotfix\") = true")
+			t.Fatal("release-v3.23.1-hotfix exists, want it absent")
 		}
 		mainAfter, err := realGit(root).Run("rev-parse", "master")
 		if err != nil {
@@ -156,7 +156,7 @@ func TestCutFromTag(t *testing.T) {
 			t.Fatal(err)
 		}
 		if branchExists(t, realGit(root), "release-v3.23.2-hotfix") {
-			t.Fatal("localBranchExists(realGit(root), \"release-v3.23.2-hotfix\") = true")
+			t.Fatal("release-v3.23.2-hotfix exists, want it absent")
 		}
 	})
 

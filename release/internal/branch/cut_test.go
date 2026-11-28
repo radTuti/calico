@@ -74,6 +74,38 @@ func TestCut(t *testing.T) {
 	})
 }
 
+// --skip accepts only CutSteps, so a node missing from it cannot be skipped.
+func TestCutSteps(t *testing.T) {
+	edit := func(string) ([]string, error) { return nil, nil }
+	derived := testPrefix + "-v3.33"
+	c := Cut{
+		Derived:        derived,
+		PrepareDerived: edit,
+		PrepareMain:    edit,
+		TagTargets: []TagTarget{
+			{Branch: derived, DevTag: "v3.33.0-" + testSuffix},
+			{Branch: "master", DevTag: "v3.34.0-" + testSuffix},
+		},
+	}
+	d := New(WithRunner(noRefs()), WithPublish(true))
+	if diff := cmp.Diff(CutSteps(), skippableNames(cutNodes(d, d.Git(), c))); diff != "" {
+		t.Fatalf("CutSteps() vs the cut's nodes (-want +got):\n%s", diff)
+	}
+}
+
+// skippableNames returns the names of the nodes that are on, minus the two
+// that no skip list names.
+func skippableNames(nodes []plan.Node) []string {
+	var names []string
+	for _, n := range nodes {
+		if n.Name == stepPrepCut || n.Name == stepSwitchBack || (n.When != nil && !n.When()) {
+			continue
+		}
+		names = append(names, n.Name)
+	}
+	return names
+}
+
 func TestTagMainNode(t *testing.T) {
 	const sha = "1111111111111111111111111111111111111111"
 	c := Cut{Derived: testPrefix + "-v3.34", TagTargets: []TagTarget{{Branch: "master", DevTag: "v3.35.0-" + testSuffix}}}
@@ -93,7 +125,7 @@ func TestTagMainNode(t *testing.T) {
 	t.Run("off without a main target", func(t *testing.T) {
 		d, g := stepDriver(t.TempDir(), noRefs(), plan.Options{})
 		if findNode(t, cutNodes(d, g, Cut{Derived: c.Derived}), stepTagMain).When() {
-			t.Fatal("findNode(t, cutNodes(d, g, Cut{Derived: c.Derived}), stepTagMain).When() = true, want false")
+			t.Fatal("tag-main is on with no main target")
 		}
 	})
 }

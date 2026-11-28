@@ -132,14 +132,11 @@ func TestPrepareRelease(t *testing.T) {
 		}
 	})
 
-	t.Run("records the base branch in the prep commit", func(t *testing.T) {
+}
+
+func TestPrepSpec(t *testing.T) {
+	t.Run("records the base branch and stages only existing paths", func(t *testing.T) {
 		f := newFakeRunner()
-		f.on("git rev-parse --abbrev-ref HEAD", "release-v3.30\n", nil)
-		f.on("git rev-parse --verify --quiet refs/heads/build-v3.30.0", "1111111111111111111111111111111111111111\n", nil)
-		f.on("git rev-parse --verify --quiet release-v3.30", "2222222222222222222222222222222222222222\n", nil)
-		// Exit 1: the staged paths changed, so there is something to commit.
-		f.on("git diff --cached --quiet", "", errNoGitRef)
-		f.on("git log --format=%s release-v3.30..build-v3.30.0", "build: v3.30.0 release\n", nil)
 		root := t.TempDir()
 		values, err := filepath.Glob("../../../../charts/*/values.yaml")
 		if err != nil || len(values) == 0 {
@@ -163,17 +160,19 @@ func TestPrepareRelease(t *testing.T) {
 			releaseBranchPrefix: "release", imageRegistries: []string{"quay.io/calico"},
 			operatorImage: "tigera/operator", operatorVersion: "v1.38.0", operatorRegistry: "quay.io",
 		}
-		if err := r.PrepareRelease(); err != nil {
-			t.Fatalf("PrepareRelease() unexpected error: %v", err)
+		spec := r.prepSpec("release-v3.30")
+		if diff := cmp.Diff("build: v3.30.0 release", spec.CommitMessage); diff != "" {
+			t.Errorf("commit message (-want +got):\n%s", diff)
 		}
-		if want := "git commit -m build: v3.30.0 release --trailer Release-branch: release-v3.30"; !f.ran(want) {
-			t.Errorf("did not run %q (calls: %v)", want, f.calls())
+		if diff := cmp.Diff([]string{"Release-branch: release-v3.30"}, spec.Trailers); diff != "" {
+			t.Errorf("trailers (-want +got):\n%s", diff)
 		}
-		wantAdd := "git add " + filepath.Join(root, "charts")
-		for _, c := range f.calls() {
-			if strings.HasPrefix(c, "git add ") && c != wantAdd {
-				t.Errorf("ran %q, want %q: only paths that exist are staged", c, wantAdd)
-			}
+		paths, err := spec.Edit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff([]string{filepath.Join(root, "charts")}, paths); diff != "" {
+			t.Errorf("staged paths (-want +got):\n%s", diff)
 		}
 	})
 }

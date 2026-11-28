@@ -17,7 +17,7 @@
 package branch
 
 import (
-	"slices"
+	"errors"
 	"strings"
 	"testing"
 
@@ -31,110 +31,42 @@ import (
 var localCutSteps = []string{stepCutBranch, stepUpdateDerived, stepTagDerived, stepUpdateMain, stepTagMain}
 
 func TestCutNodes(t *testing.T) {
-	// The flow creates the branch with the edit on its head, not an
-	// empty commit; plan mode commits nothing.
+	// The head is the edits commit, not an empty "Begin development" commit.
 	t.Run("lands the edit on the new branch", func(t *testing.T) {
 		root := initGitRepo(t)
-
-		prepare := func(string) ([]string, error) {
-			written, _, err := ApplyEdits(root, []Edit{
-				{File: "metadata.mk", Pattern: `^MANAGER_BRANCH.*`, Replacement: "MANAGER_BRANCH ?= " + testPrefix + "-v3.33"},
-			})
-			return written, err
-		}
-
-		newPlan := func() Cut {
-			return Cut{
-				Main:           "master",
-				PrepareDerived: prepare,
-				Derived:        testPrefix + "-v3.33",
-				Source:         "master",
-				TagTargets: []TagTarget{
-					{Branch: testPrefix + "-v3.33", DevTag: "v3.33.0-" + testSuffix},
-				},
-			}
-		}
-
-		// plan mode: nothing is created or committed.
-		planD, planG := stepDriver(root, nil, plan.Options{Preview: true})
-		if err := runNodes(t, planD, planG, newPlan(), localCutSteps...); err != nil {
-			t.Fatal(err)
-		}
-		if branchExists(t, planG, testPrefix+"-v3.33") {
-			t.Fatalf("plan mode must not create the branch")
-		}
-
-		// apply mode: branch is created, edit is committed on its head.
-		applyD, applyG := stepDriver(root, nil, plan.Options{})
-		if err := runNodes(t, applyD, applyG, newPlan(), localCutSteps...); err != nil {
-			t.Fatal(err)
-		}
-
-		if !branchExists(t, applyG, testPrefix+"-v3.33") {
-			t.Fatal("localBranchExists(applyG, testPrefix+\"-v3.33\") = false")
-		}
-
-		// The edited file content on the new branch reflects the edit.
-		content, err := realGit(root).Run("show", testPrefix+"-v3.33:metadata.mk")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(content, "MANAGER_BRANCH ?= "+testPrefix+"-v3.33") {
-			t.Fatalf("%q missing %q", content, "MANAGER_BRANCH ?= "+testPrefix+"-v3.33")
-		}
-
-		// The head is the edits commit, not an empty "Begin development" commit.
-		subject := gitHeadSubject(t, root, testPrefix+"-v3.33")
-		if diff := cmp.Diff("Updates for "+testPrefix+"-v3.33 release branch", subject); diff != "" {
-			t.Fatalf("subject mismatch (-want +got):\n%s", diff)
-		}
-
-		// The edits commit is not empty: it differs from its parent.
-		_, err = realGit(root).Run("diff", "--quiet", testPrefix+"-v3.33~1", testPrefix+"-v3.33")
-		if err == nil {
-			t.Fatalf("the new branch head must contain the edit, not be an empty commit")
-		}
-	})
-
-	// A cut off main has no derived tag; tag-derived and pushRefs no-op.
-	t.Run("a main-only cut has no derived tag", func(t *testing.T) {
-		root := srcBumpRepo(t)
-
+		derived := testPrefix + "-v3.33"
 		p := Cut{
 			Main:    "master",
-			Derived: testPrefix + "-v3.33",
+			Derived: derived,
 			Source:  "master",
-			TagTargets: []TagTarget{
-				{Branch: "master", DevTag: "v3.34.0-" + testSuffix},
+			PrepareDerived: func(string) ([]string, error) {
+				written, err := branchEditPrepare(t, root, derived)("")
+				writeFile(t, root, "hook-file.txt", "written by the hook\n")
+				return append(written, "hook-file.txt"), err
 			},
+			TagTargets: []TagTarget{{Branch: derived, DevTag: "v3.33.0-" + testSuffix}},
 		}
 		d, g := stepDriver(root, nil, plan.Options{})
-		p.PrepareDerived = branchEditPrepare(t, root, testPrefix+"-v3.33")
-
 		if err := runNodes(t, d, g, p, localCutSteps...); err != nil {
 			t.Fatal(err)
 		}
 
-		// The derived branch exists with its edits commit but no dev tag.
-		if !branchExists(t, g, testPrefix+"-v3.33") {
-			t.Fatal("localBranchExists(g, testPrefix+\"-v3.33\") = false")
-		}
-		// pushRefs pushes the derived branch and main's tag, but no derived tag.
-		if slices.Contains(d.cutSpec(g, p).pushRefs(), "v3.33.0-"+testSuffix) {
-			t.Fatalf("%q has %q", d.cutSpec(g, p).pushRefs(), "v3.33.0-"+testSuffix)
-		}
-
-		// Main advanced: its dev tag sits on master's head.
-		tagged, err := realGit(root).Run("rev-parse", "v3.34.0-"+testSuffix+"^{commit}")
+		meta, err := realGit(root).Run("show", derived+":metadata.mk")
 		if err != nil {
 			t.Fatal(err)
 		}
-		head, err := realGit(root).Run("rev-parse", "master")
+		if !strings.Contains(meta, "MANAGER_BRANCH ?= "+derived) {
+			t.Fatalf("metadata.mk on %s = %q, want the MANAGER_BRANCH edit", derived, meta)
+		}
+		hook, err := realGit(root).Run("show", derived+":hook-file.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if diff := cmp.Diff(strings.TrimSpace(head), strings.TrimSpace(tagged)); diff != "" {
-			t.Fatalf("strings.TrimSpace(tagged) mismatch (-want +got):\n%s", diff)
+		if diff := cmp.Diff("written by the hook", hook); diff != "" {
+			t.Fatalf("hook-file.txt (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff("Updates for "+derived+" release branch", gitHeadSubject(t, root, derived)); diff != "" {
+			t.Fatalf("head subject (-want +got):\n%s", diff)
 		}
 	})
 
@@ -196,7 +128,7 @@ func TestCutNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(strings.TrimSpace(head), strings.TrimSpace(tagged)); diff != "" {
-			t.Fatalf("strings.TrimSpace(tagged) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("main tag commit (-want +got):\n%s", diff)
 		}
 	})
 
@@ -245,7 +177,7 @@ func TestCutNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(strings.TrimSpace(head), strings.TrimSpace(tagged)); diff != "" {
-			t.Fatalf("strings.TrimSpace(tagged) mismatch (-want +got):\n%s", diff)
+			t.Fatalf("main tag commit (-want +got):\n%s", diff)
 		}
 	})
 
@@ -290,30 +222,93 @@ func TestCutNodes(t *testing.T) {
 		}
 	})
 
-	// A GA master cut with no PrepareSource leaves the source metadata untouched.
-	t.Run("a GA cut leaves the source metadata", func(t *testing.T) {
-		root := srcBumpRepo(t)
-
-		p := Cut{
-			Main:    "master",
-			Derived: testPrefix + "-v3.33",
-			Source:  "master",
-			TagTargets: []TagTarget{
-				{Branch: testPrefix + "-v3.33", DevTag: "v3.33.0-" + testSuffix},
-			},
+	refs := func(t *testing.T, dirs ...string) []string {
+		t.Helper()
+		var out []string
+		for _, dir := range dirs {
+			s, err := realGit(dir).Run("for-each-ref", "--format=%(refname) %(objectname)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, strings.Split(strings.TrimSpace(s), "\n")...)
 		}
-		d, g := stepDriver(root, nil, plan.Options{})
-		p.PrepareDerived = branchEditPrepare(t, root, testPrefix+"-v3.33")
-		if err := runNodes(t, d, g, p, localCutSteps...); err != nil {
+		return out
+	}
+	mainCut := func(t *testing.T, root string, prepareDerived func(string) ([]string, error)) Cut {
+		var ranOn string
+		return Cut{
+			Main:           "master",
+			Source:         "master",
+			Derived:        testPrefix + "-v3.33",
+			Validate:       true,
+			PrepareDerived: prepareDerived,
+			PrepareMain:    bumpMainPrepare(t, root, &ranOn),
+			TagTargets:     []TagTarget{{Branch: "master", DevTag: "v3.34.0-" + testSuffix}},
+		}
+	}
+	trackedRepo := func(t *testing.T) (root, remote string) {
+		root = srcBumpRepo(t)
+		remote = initGitRemote(t, root)
+		if _, err := realGit(root).Run("branch", "--set-upstream-to=origin/master", "master"); err != nil {
 			t.Fatal(err)
 		}
+		return root, remote
+	}
 
-		masterMeta, err := realGit(root).Run("show", "master:metadata.mk")
+	t.Run("a re-run of a finished cut changes nothing", func(t *testing.T) {
+		root, remote := trackedRepo(t)
+		c := mainCut(t, root, branchEditPrepare(t, root, testPrefix+"-v3.33"))
+		d := newTestDriver(t, root, WithPublish(true))
+		if err := runCut(d, c); err != nil {
+			t.Fatal(err)
+		}
+		before := refs(t, root, remote)
+		if err := runCut(d, c); err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff(before, refs(t, root, remote)); diff != "" {
+			t.Fatalf("refs after the re-run (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("a re-run finishes a failed cut", func(t *testing.T) {
+		root, remote := trackedRepo(t)
+		derived := testPrefix + "-v3.33"
+		edit := branchEditPrepare(t, root, derived)
+		d := newTestDriver(t, root, WithPublish(true))
+		failing := mainCut(t, root, func(b string) ([]string, error) {
+			if _, err := edit(b); err != nil {
+				t.Fatal(err)
+			}
+			return nil, errors.New("hook failed")
+		})
+		if err := runCut(d, failing); err == nil || !strings.Contains(err.Error(), "hook failed") {
+			t.Fatalf("err = %v, want it to contain %q", err, "hook failed")
+		}
+		cur, err := realGit(root).Branch()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(masterMeta, "CALICO_VERSION=v3.33.0") {
-			t.Fatalf("a GA cut must not bump the source CALICO_VERSION: %q missing %q", masterMeta, "CALICO_VERSION=v3.33.0")
+		if diff := cmp.Diff("master", cur); diff != "" {
+			t.Fatalf("branch after the failure (-want +got):\n%s", diff)
+		}
+
+		if err := runCut(d, mainCut(t, root, edit)); err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff("Updates for "+derived+" release branch", gitHeadSubject(t, root, derived)); diff != "" {
+			t.Fatalf("head subject of %s (-want +got):\n%s", derived, diff)
+		}
+		pushed, err := realGit(remote).Resolve("refs/heads/" + derived)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local, err := realGit(root).Resolve("refs/heads/" + derived)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff(local, pushed); diff != "" {
+			t.Fatalf("pushed %s (-want +got):\n%s", derived, diff)
 		}
 	})
 
@@ -379,74 +374,17 @@ func TestCutNodes(t *testing.T) {
 			t.Fatalf("an unrelated pre-staged file must not enter the cut commit: %q has %q", files, "unrelated.txt")
 		}
 	})
-}
 
-func TestDerived(t *testing.T) {
-	// Every file the PrepareDerived hook returns is committed on the derived branch.
-	t.Run("commits the files the hook returns", func(t *testing.T) {
-		root := initGitRepo(t)
-
-		p := Cut{
-			Main:    "master",
-			Derived: testPrefix + "-v3.33",
-			Source:  "master",
-		}
-		d, g := stepDriver(root, nil, plan.Options{})
-		p.PrepareDerived = func(string) ([]string, error) {
-			written, _, err := ApplyEdits(root, []Edit{
-				{File: "metadata.mk", Pattern: `^MANAGER_BRANCH.*`, Replacement: "MANAGER_BRANCH ?= " + testPrefix + "-v3.33"},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			writeFile(t, root, "hook-file.txt", "written by the hook\n")
-			return append(written, "hook-file.txt"), nil
-		}
-
-		if err := runNodes(t, d, g, p, stepCutBranch, stepUpdateDerived); err != nil {
-			t.Fatal(err)
-		}
-
-		// The hook's extra file is committed on the derived branch head.
-		content, err := realGit(root).Run("show", testPrefix+"-v3.33:hook-file.txt")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(content, "written by the hook") {
-			t.Fatalf("%q missing %q", content, "written by the hook")
-		}
-
-		// The hook's edit landed in the same commit.
-		meta, err := realGit(root).Run("show", testPrefix+"-v3.33:metadata.mk")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(meta, "MANAGER_BRANCH ?= "+testPrefix+"-v3.33") {
-			t.Fatalf("%q missing %q", meta, "MANAGER_BRANCH ?= "+testPrefix+"-v3.33")
-		}
-	})
-
-	// A resume re-cuts the derived branch from source when source advanced, so new
-	// source commits are picked up; an unchanged source leaves the branch in place.
+	// A run that failed before the edit landed resumes from the advanced source.
 	t.Run("resets when the source advanced", func(t *testing.T) {
 		root := initGitRepo(t)
 		derived := testPrefix + "-v3.33"
-		p := Cut{Main: "master", Derived: derived, Source: "master"}
-		prepare := func(string) ([]string, error) {
-			written, _, err := ApplyEdits(root, []Edit{
-				{File: "metadata.mk", Pattern: `^MANAGER_BRANCH.*`, Replacement: "MANAGER_BRANCH ?= " + derived},
-			})
-			return written, err
-		}
+		p := Cut{Main: "master", Derived: derived, Source: "master", PrepareDerived: branchEditPrepare(t, root, derived)}
 		d, g := stepDriver(root, nil, plan.Options{})
-		p.PrepareDerived = prepare
-
-		// First cut: create derived off master and apply the edit.
-		if err := runNodes(t, d, g, p, stepCutBranch, stepUpdateDerived); err != nil {
+		if err := runNodes(t, d, g, p, stepCutBranch); err != nil {
 			t.Fatal(err)
 		}
 
-		// Advance master with a new commit the derived branch does not have.
 		_, err := realGit(root).Run("checkout", "-q", "master")
 		if err != nil {
 			t.Fatal(err)
@@ -461,12 +399,10 @@ func TestDerived(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Resume update-derived: it must re-cut derived from the advanced master.
 		if err := runNodes(t, d, g, p, stepUpdateDerived); err != nil {
 			t.Fatal(err)
 		}
 
-		// The derived branch now contains master's new file, and still has the edit.
 		content, err := realGit(root).Run("show", derived+":new-on-master.txt")
 		if err != nil {
 			t.Fatal(err)

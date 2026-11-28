@@ -170,7 +170,6 @@ func TestCutBranchNode(t *testing.T) {
 	})
 }
 
-// update-derived calls PrepareDerived; plan mode does not.
 func TestUpdateDerivedNode(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "metadata.mk", "MANAGER_BRANCH ?= master\n")
@@ -188,27 +187,19 @@ func TestUpdateDerivedNode(t *testing.T) {
 		return written, nil
 	}
 
-	t.Run("preview does not act", func(t *testing.T) {
-		d, g := stepDriver(root, noRefs(), plan.Options{Preview: true})
-		c.PrepareDerived = prepare
-		if err := runNodes(t, d, g, c, stepUpdateDerived); err != nil {
-			t.Fatal(err)
-		}
-		if len(events) > 0 {
-			t.Fatalf("events = %v, want empty", events)
-		}
-		if diff := cmp.Diff("MANAGER_BRANCH ?= master\n", readFile(t, root, "metadata.mk")); diff != "" {
-			t.Fatalf("metadata.mk (-want +got):\n%s", diff)
-		}
-	})
-
-	t.Run("apply runs the hook", func(t *testing.T) {
+	subject := "Updates for " + testPrefix + "-v3.33 release branch\n"
+	t.Run("runs the hook", func(t *testing.T) {
+		var logs int
 		r := &command.Recorder{Reply: func(c command.Call) (string, error) {
 			switch c.Args[0] {
 			case "rev-parse":
 				return "", errFake
 			case "log":
-				return "Updates for " + testPrefix + "-v3.33 release branch\n", nil
+				// The first log is the pre-run check, before the edit commit exists.
+				if logs++; logs == 1 {
+					return "", nil
+				}
+				return subject, nil
 			}
 			return "", nil
 		}}
@@ -222,6 +213,27 @@ func TestUpdateDerivedNode(t *testing.T) {
 		}
 		if diff := cmp.Diff("MANAGER_BRANCH ?= release-vX\n", readFile(t, root, "metadata.mk")); diff != "" {
 			t.Fatalf("metadata.mk (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("a committed edit is not redone", func(t *testing.T) {
+		events = nil
+		r := &command.Recorder{Reply: func(c command.Call) (string, error) {
+			if c.Args[0] == "log" {
+				return subject, nil
+			}
+			return "", nil
+		}}
+		d, g := stepDriver(root, r, plan.Options{})
+		c.PrepareDerived = prepare
+		if err := findNode(t, cutNodes(d, g, c), stepUpdateDerived).Do(); err != nil {
+			t.Fatal(err)
+		}
+		if len(events) > 0 {
+			t.Fatalf("hook ran %v, want it skipped", events)
+		}
+		if diff := cmp.Diff([]string{"checkout", testPrefix + "-v3.33"}, gitArgs(r)[len(gitArgs(r))-1]); diff != "" {
+			t.Fatalf("last git call (-want +got):\n%s", diff)
 		}
 	})
 
@@ -321,6 +333,7 @@ func TestPushRefsNode(t *testing.T) {
 	t.Run("Do", func(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
+			cut   Cut
 			local bool
 			skip  map[string]bool
 			want  [][]string
@@ -328,11 +341,20 @@ func TestPushRefsNode(t *testing.T) {
 			{name: "publishes", want: [][]string{{"push", "origin", derived}}},
 			{name: "local checks the push", local: true, want: [][]string{{"push", "origin", "--dry-run", derived}}},
 			{name: "pushes the ref of a skipped step", skip: map[string]bool{stepCutBranch: true}, want: [][]string{{"push", "origin", derived}}},
+			{
+				name: "a cut off main pushes main's tag and no derived tag",
+				cut:  Cut{Derived: derived, TagTargets: []TagTarget{{Branch: "master", DevTag: "v3.34.0-" + testSuffix}}},
+				want: [][]string{{"push", "origin", "master", derived, "v3.34.0-" + testSuffix}},
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
+				cut := c
+				if tc.cut.Derived != "" {
+					cut = tc.cut
+				}
 				g := &command.Recorder{}
 				d := New(WithRemote("origin"), WithPublish(true), WithPlanOptions(plan.Options{Local: tc.local, Skip: tc.skip}))
-				if err := findNode(t, cutNodes(d, command.Git(g), c), PushRefsStep).Do(); err != nil {
+				if err := findNode(t, cutNodes(d, command.Git(g), cut), PushRefsStep).Do(); err != nil {
 					t.Fatalf("push-refs Do() unexpected error: %v", err)
 				}
 				if diff := cmp.Diff(tc.want, gitArgs(g)); diff != "" {
@@ -344,14 +366,14 @@ func TestPushRefsNode(t *testing.T) {
 
 	t.Run("off when publish is off", func(t *testing.T) {
 		if findNode(t, cutNodes(New(), command.Git(&command.Recorder{}), c), PushRefsStep).When() {
-			t.Fatal("findNode(t, cutNodes(New(), command.Git(&command.Recorder{}), c), PushRefsStep).When() = true, want false")
+			t.Fatal("push-refs is on with publish off")
 		}
 	})
 
 	t.Run("Validate needs a remote", func(t *testing.T) {
 		d := New(WithPublish(true))
 		if err := findNode(t, cutNodes(d, command.Git(&command.Recorder{}), c), PushRefsStep).Validate(); err == nil {
-			t.Fatal("findNode(t, cutNodes(d, command.Git(&command.Recorder{}), c), PushRefsStep).Validate() = nil, want an error")
+			t.Fatal("push-refs Validate() passed with no remote")
 		}
 	})
 }

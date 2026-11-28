@@ -271,8 +271,14 @@ func cutBranch(g command.GitRunner, j spec) error {
 // updateDerived runs the edit on the derived branch and commits the files it
 // changed.
 func updateDerived(g command.GitRunner, j spec) error {
-	// If source advanced past the derived branch, re-cut it from source so the
-	// resume picks up the new source commits; otherwise just check it out.
+	// A cut off main adds commits to main later, which must not trigger a
+	// reset on re-run.
+	if hasCommit(g, j.source, j.derived, j.commitMessage) == nil {
+		logrus.WithFields(logrus.Fields{"branch": j.derived, "step": stepUpdateDerived}).Info("edit already committed")
+		return checkoutBranch(g, j.derived)
+	}
+	// Source advanced before the edit landed: re-cut from it so the branch
+	// picks up the new commits.
 	ahead, err := sourceAheadOf(g, j.source, j.derived)
 	if err != nil {
 		return err

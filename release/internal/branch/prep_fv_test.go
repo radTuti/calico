@@ -101,17 +101,17 @@ func TestPrepNodes(t *testing.T) {
 			t.Errorf("committed files (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff("master", currentBranch(t, root)); diff != "" {
-			t.Fatalf("currentBranch(t, root) (-want +got):\n%s", diff)
+			t.Fatalf("current branch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff("build: v3.33.1 release", gitHeadSubject(t, root, prepBranch)); diff != "" {
-			t.Fatalf("gitHeadSubject(t, root, prepBranch) (-want +got):\n%s", diff)
+			t.Fatalf("prep commit subject (-want +got):\n%s", diff)
 		}
 		trailer, err := realGit(root).Run("log", "-1", "--format=%(trailers:key=Release-Branch,valueonly)", prepBranch)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff("master", strings.TrimSpace(trailer)); diff != "" {
-			t.Fatalf("strings.TrimSpace(trailer) (-want +got):\n%s", diff)
+			t.Fatalf("Release-Branch trailer (-want +got):\n%s", diff)
 		}
 	})
 
@@ -127,7 +127,7 @@ func TestPrepNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff("1", commitsAhead(t, root)); diff != "" {
-			t.Fatalf("commitsAhead(t, root) (-want +got):\n%s", diff)
+			t.Fatalf("prep commits ahead of master (-want +got):\n%s", diff)
 		}
 	})
 
@@ -144,7 +144,7 @@ func TestPrepNodes(t *testing.T) {
 			t.Fatalf("err = %v, want it to contain %q", err, "edit failed")
 		}
 		if diff := cmp.Diff("master", currentBranch(t, root)); diff != "" {
-			t.Fatalf("currentBranch(t, root) (-want +got):\n%s", diff)
+			t.Fatalf("current branch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(before, readFile(t, root, "metadata.mk")); diff != "" {
 			t.Fatalf("metadata.mk (-want +got):\n%s", diff)
@@ -164,7 +164,7 @@ func TestPrepNodes(t *testing.T) {
 			t.Fatalf("err = %v, want it to contain %q", err, "commit on "+prepBranch+" since master")
 		}
 		if branchExists(t, realGit(remote), prepBranch) {
-			t.Fatal("branchExists(t, realGit(remote), prepBranch) = true, want false")
+			t.Fatalf("remote has %s, want it absent", prepBranch)
 		}
 	})
 
@@ -208,7 +208,7 @@ func TestPrepNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if branchExists(t, realGit(remote), prepBranch) {
-			t.Fatal("branchExists(t, realGit(remote), prepBranch) = true, want false")
+			t.Fatalf("remote has %s, want it absent", prepBranch)
 		}
 	})
 }
