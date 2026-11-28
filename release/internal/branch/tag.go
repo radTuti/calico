@@ -41,22 +41,13 @@ func TagSource(tagName string) string {
 }
 
 // checkTagOnRemote verifies tagName exists locally and on remote at the same
-// commit. Under report (plan mode) a mismatch is a warning; a failed remote
-// query is always an error.
-func checkTagOnRemote(g command.GitRunner, tagName, remote string, report bool) error {
+// commit.
+func checkTagOnRemote(g command.GitRunner, tagName, remote string) error {
 	out, err := lsRemoteTag(g, tagName, remote)
 	if err != nil {
 		return err
 	}
-	problem := tagMismatch(g, tagName, remote, out)
-	if problem == nil {
-		return nil
-	}
-	if report {
-		logrus.Warnf("%v; a cut will error unless resolved", problem)
-		return nil
-	}
-	return problem
+	return tagMismatch(g, tagName, remote, out)
 }
 
 // lsRemoteTag lists tagName on remote, or nothing when the remote lacks it.
@@ -193,7 +184,7 @@ type PushTagOptions struct {
 	Remote   string
 	RepoRoot string
 	Skip     bool
-	DryRun   bool
+	Local    bool
 	Runner   command.CommandRunner
 }
 
@@ -201,7 +192,7 @@ func TagUpload(o PushTagOptions) distribution.Upload {
 	t := TagPush{
 		Tag:    o.Tag,
 		Remote: o.Remote,
-		DryRun: o.DryRun,
+		Local:  o.Local,
 		git:    command.Git(o.Runner).In(o.RepoRoot),
 	}
 	done := t.Pushed
@@ -223,7 +214,7 @@ var _ distribution.Validator = TagPush{}
 type TagPush struct {
 	Tag    string
 	Remote string
-	DryRun bool
+	Local  bool // if true, run push with --dry-run
 	git    command.GitRunner
 }
 
@@ -267,7 +258,7 @@ func (t TagPush) Publish(context.Context, string) error {
 		logrus.WithField("tag", t.Tag).Info("Remote tag already exists and matches, skipping push")
 		return nil
 	}
-	if err := pushRefs(t.git, t.Remote, t.DryRun, tagRefPrefix+t.Tag); err != nil {
+	if err := pushRefs(t.git, t.Remote, t.Local, false, tagRefPrefix+t.Tag); err != nil {
 		return fmt.Errorf("push tag %s: %w", t.Tag, err)
 	}
 	return nil

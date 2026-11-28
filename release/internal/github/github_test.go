@@ -167,3 +167,82 @@ func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	r.auth = req.Header.Get("Authorization")
 	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 }
+
+func TestOwnerFromRemoteURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "SSH with .git suffix",
+			url:  "git@github.com:projectcalico/calico.git",
+			want: "projectcalico",
+		},
+		{
+			name: "SSH without .git suffix",
+			url:  "git@github.com:projectcalico/calico",
+			want: "projectcalico",
+		},
+		{
+			name: "HTTPS with .git suffix",
+			url:  "https://github.com/projectcalico/calico.git",
+			want: "projectcalico",
+		},
+		{
+			name: "HTTPS without .git suffix",
+			url:  "https://github.com/projectcalico/calico",
+			want: "projectcalico",
+		},
+		{
+			name: "SSH fork",
+			url:  "git@github.com:myFork/calico.git",
+			want: "myFork",
+		},
+		{
+			name: "HTTPS fork",
+			url:  "https://github.com/myFork/calico.git",
+			want: "myFork",
+		},
+		{
+			name: "SSH with nested path",
+			url:  "git@github.com:org/sub/repo.git",
+			want: "sub",
+		},
+		{
+			name:    "bare hostname no path",
+			url:     "github.com",
+			wantErr: true,
+		},
+		{
+			name:    "empty string",
+			url:     "",
+			wantErr: true,
+		},
+		{
+			name:    "local path",
+			url:     "/tmp/repo",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := OwnerFromRemoteURL(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("OwnerFromRemoteURL(%q) = %q, want error", tt.url, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("OwnerFromRemoteURL(%q) error = %v", tt.url, err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("OwnerFromRemoteURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}

@@ -84,6 +84,10 @@ func (s Step) Make() command.MakeRunner {
 	return command.Make(s.Runner(), s.dir)
 }
 
+func (s Step) Git() command.GitRunner {
+	return command.Git(s.Runner()).In(s.dir)
+}
+
 // Logger tags every line with the step, so a release running several steps
 // produces output a reader can tell apart.
 func (s Step) Logger() *logrus.Entry {

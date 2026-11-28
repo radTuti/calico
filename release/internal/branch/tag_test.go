@@ -222,7 +222,7 @@ func TestTagUpload(t *testing.T) {
 
 	t.Run("a dry run previews the push", func(t *testing.T) {
 		dryPush := fmt.Sprintf("git push %s --dry-run %s", remote, ref)
-		u, rec := upload(PushTagOptions{DryRun: true}, map[string]string{lsRemote: "", dryPush: ""})
+		u, rec := upload(PushTagOptions{Local: true}, map[string]string{lsRemote: "", dryPush: ""})
 		if err := u.Handler.Publish(context.Background(), ""); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}

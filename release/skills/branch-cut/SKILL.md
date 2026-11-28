@@ -33,26 +33,27 @@ master's current dev tag; master advances to its next dev version with a new tag
 
 Options:
 
-- **Preview:** `release branch cut --plan` reports each step as `will run`,
-  `done`, or `skip` and changes nothing.
-- **Skip a step:** `--skip <step-name>` (repeatable). Valid names are the step
-  constants in `driver.go`; an unknown name is rejected.
+- **Preview:** `release branch cut --plan` reports each step as `Will run` or
+  `Will skip`, and a failing check as `Will fail`. It changes nothing.
+- **Skip a step:** `--skip <step-name>` (repeatable). Valid names are in
+  `cutSteps` in `cut.go`; an unknown name is rejected.
 
 ## The steps and how resume works
 
 The cut runs a fixed, ordered list of check-then-act steps. The authoritative
-list is the `step*` constants and `stepNames` in
-[`release/internal/branch/driver.go`](../../internal/branch/driver.go) — read
-them there rather than trusting a copy here. Each step first _checks_ whether its
-effect is already in place (branch exists, files already at their new values,
-tags present, refs already pushed and matching) and skips itself if so.
+list is `cutSteps` in
+[`release/internal/branch/cut.go`](../../internal/branch/cut.go), with the step
+constants in `driver.go` — read them there rather than trusting a copy here.
+Each step first _checks_ whether its effect is already in place (branch exists,
+files already at their new values, tags present, refs already pushed and
+matching) and skips itself if so.
 
 That check-first design is the whole recovery story:
 
 - **Resume after a failure:** fix whatever the failed step reported, then run the
-  same command again — it picks up at the first not-done step. Recovery is by
-  re-running, not rollback. A fresh cut refuses to start on a dirty working tree;
-  a resume does not.
+  same command again — it picks up at the first not-done step. A failed run
+  only switches back to the source branch; recovery is by re-running. A fresh
+  cut refuses to start on a dirty working tree; a resume does not.
 
 A fresh cut branches off current code: before it starts, it checks master is
 current with its remote. The check never moves a branch — it only compares the
@@ -68,7 +69,7 @@ The manager owns its edit list, so the cut tolerates repo drift. The edits are
 defined by the manager, not the shared cut engine.
 
 - Calico: `derivedBranchEdits` in
-  [`release/pkg/manager/calico/manager.go`](../../pkg/manager/calico/manager.go).
+  [`release/pkg/manager/calico/branch.go`](../../pkg/manager/calico/branch.go).
 
 The manager passes its edits to the driver, which applies them through the generic applier in
 [`release/internal/branch/edits.go`](../../internal/branch/edits.go). Every edit

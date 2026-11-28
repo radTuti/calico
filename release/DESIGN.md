@@ -215,11 +215,12 @@ them. The rules:
 
 ## Branch cut
 
-`internal/branch` cuts a release branch. A cut resolves into a `CutPlan`, then
-runs a list of check-then-act steps: `Done` probes whether the effect exists,
-`Do` makes it. So a cut can be printed before it runs, skipped by step name, and
-resumed. Repo-specific work plugs in through func fields on `Driver`, not by
-changing the steps.
+`internal/branch` owns the git nodes of a branch cut or a release prep: branch
+off a source, commit edits, tag, push, and end back on the source, failed or
+not. They share HEAD, so their order lives there alone. The manager adds its own
+nodes around them (checks, release notes, the PR), as publish does around
+`distribution.Node`. `Done` probes whether a node's effect exists, so a run can
+be printed, skipped by step name, and resumed.
 
 ## Do's and Don'ts
 

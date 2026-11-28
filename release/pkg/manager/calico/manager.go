@@ -56,9 +56,9 @@ const (
 )
 
 const (
-	prepBuildStep = "prep-build"
-
+	prepBuildStep   = "prep-build"
 	prepPublishStep = "prep-publish"
+	prepReleaseStep = "prep-release"
 )
 
 var (
@@ -88,6 +88,14 @@ var (
 	// order they run.
 	HashreleasePublishSteps = func() []string {
 		return slices.Concat(sharedPublishSteps, hashreleasePublishSteps)
+	}
+
+	// CutSteps are the steps a branch cut can skip, in the order they run.
+	CutSteps = branch.CutSteps
+
+	// PrepSteps are the steps a release prep can skip, in the order they run.
+	PrepSteps = func() []string {
+		return slices.Concat([]string{outputs.ReleaseNotesStep}, branch.PrepSteps(), []string{github.PRStep})
 	}
 )
 
@@ -159,9 +167,6 @@ func NewManager(opts ...Option) (*CalicoManager, error) {
 type CalicoManager struct {
 	// Allow specification of command runner so it can be overridden in tests.
 	runner command.CommandRunner
-
-	// releaseImages defaults to sweeping the release dirs with make.
-	releaseImages func() ([]string, error)
 
 	// The product code for the release.
 	productCode string
@@ -243,10 +248,7 @@ type CalicoManager struct {
 	releaseBranchPrefix string
 
 	// beforePrep runs on the base branch, after the prep checks pass.
-	beforePrep func() error
-
-	// cutOptions holds the branch-cut inputs
-	cutOptions branch.CutOptions
+	beforePrep beforePrepDriver
 
 	// architectures is the list of architectures for which we should build images.
 	// If empty, we build for all.
@@ -321,11 +323,7 @@ func (r *CalicoManager) Build() error {
 	if r.buildNodes != nil {
 		nodes = r.buildNodes
 	}
-	p, err := plan.New(r.planOptions, nodes()...)
-	if err != nil {
-		return err
-	}
-	return p.Run()
+	return r.runPlan(nodes())
 }
 
 func (r *CalicoManager) createDirs() error {
@@ -399,18 +397,21 @@ func (r *CalicoManager) buildPlan() []plan.Node {
 	if r.isHashRelease {
 		nodes = append(nodes, plan.Node{
 			Name: outputs.ReleaseNotesStep,
-			// Notes come from the Calico repos' milestones, so no other repo has any.
-			When: func() bool {
-				return r.releaseNotes && r.repo.Is(calicoRepo)
+			When: func() bool { return r.releaseNotes && r.repo.Is(calicoRepo) },
+			Do: func() error {
+				ver, err := version.DetermineReleaseVersion(r.calicoVersion, r.devTagIdentifier)
+				if err != nil {
+					return fmt.Errorf("determine release version: %w", err)
+				}
+				return r.buildReleaseNotes(filepath.Join(r.outputDir, outputs.ReleaseNotesDir), ver)
 			},
-			Do: r.buildReleaseNotes,
 		})
 	} else {
 		nodes = append(nodes, r.createTagNode())
 	}
 	nodes = append(
 		nodes,
-		r.operatorNode(),
+		r.operatorNode(nil),
 		plan.Node{Name: images.Step, When: func() bool { return r.images }, Do: r.buildContainerImages},
 		plan.Node{
 			Name: binaries.Step,
@@ -466,12 +467,13 @@ func (r *CalicoManager) createTagNode() plan.Node {
 	}
 }
 
-func (r *CalicoManager) operatorNode() plan.Node {
+func (r *CalicoManager) operatorNode(validateFn func() error) plan.Node {
 	return plan.Node{
-		Name: operator.Step,
-		Do:   func() error { return r.operator.Do() },
-		When: func() bool { return r.operator.Do != nil },
-		Done: r.operator.Done,
+		Name:     operator.Step,
+		Validate: validateFn,
+		Do:       func() error { return r.operator.Do() },
+		When:     func() bool { return r.operator.Do != nil },
+		Done:     r.operator.Done,
 	}
 }
 
@@ -628,80 +630,65 @@ var (
 
 func (r *CalicoManager) PreHashreleaseValidate() error {
 	var errStack error
-	if err := r.checkBranch(func() error {
-		branch, err := command.Git(r.runner).In(r.repoRoot).Branch()
-		if err != nil {
-			return fmt.Errorf("failed to determine branch: %s", err)
-		}
-		match := fmt.Sprintf(`^(%s|%s-%s)$`, defaults.Branch, r.releaseBranchPrefix, releaseBranchTail)
-		if !regexp.MustCompile(match).MatchString(branch) {
-			return fmt.Errorf("calico checkout is not on a release branch")
-		}
-		return nil
-	}); err != nil {
+	if err := r.checkBranch(fmt.Sprintf(`^(%s|%s-%s)$`, defaults.Branch, r.releaseBranchPrefix, releaseBranchTail), "hashrelease branch"); err != nil {
 		errStack = errors.Join(errStack, err)
 	}
-	dirty, err := command.Git(r.runner).In(r.repoRoot).Dirty()
-	if err != nil {
-		return fmt.Errorf("failed to check if git is dirty: %s", err)
-	}
-	if dirty {
-		errStack = errors.Join(errStack, fmt.Errorf("there are uncommitted changes in the repository, please commit or stash them before building the hashrelease"))
+	if dirty, err := command.Git(r.runner).In(r.repoRoot).Dirty(); err != nil {
+		return fmt.Errorf("check if git is dirty: %w", err)
+	} else if dirty {
+		errStack = errors.Join(errStack, fmt.Errorf("there are uncommitted changes in the repository, please commit or stash them"))
 	}
 	return errStack
 }
 
-func (r *CalicoManager) checkBranch(check func() error) error {
-	err := check()
-	if err == nil || r.validateBranch {
-		return err
+func (r *CalicoManager) checkBranch(match, desc string) error {
+	if !r.validateBranch {
+		logrus.Warn("Skipping branch check because validateBranch is false")
+		return nil
 	}
-	logrus.WithError(err).Warn("Using the wrong branch")
+	branch, err := command.Git(r.runner).In(r.repoRoot).Branch()
+	if err != nil {
+		return fmt.Errorf("get current branch: %w", err)
+	}
+	re, err := regexp.Compile(match)
+	if err != nil {
+		return fmt.Errorf("regexp compile: %w", err)
+	}
+	if !re.MatchString(branch) {
+		return fmt.Errorf("check branch: current branch (%s) is not a %s", branch, desc)
+	}
 	return nil
 }
 
 func (r *CalicoManager) PreReleaseValidate() error {
+	var errs []error
 	if err := r.assertReleaseNotesPresent(r.calicoVersion.String()); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-
 	// Check that we are on a release branch
-	if err := r.checkBranch(func() error {
-		branch, err := command.Git(r.runner).In(r.repoRoot).Branch()
-		if err != nil {
-			return fmt.Errorf("failed to determine branch: %s", err)
-		}
-		// releases can only be cut from a release branch (i.e release-vX.Y) or build version branch (i.e. build-vX.Y.Z)
-		match := fmt.Sprintf(`^(%s-%s|build-v\d+\.\d+\.\d+)$`, r.releaseBranchPrefix, releaseBranchTail)
-		if !regexp.MustCompile(match).MatchString(branch) {
-			return fmt.Errorf("current branch (%s) is not a release branch", branch)
-		}
-		return nil
-	}); err != nil {
-		return err
+	if err := r.checkBranch(fmt.Sprintf(`^(%s-%s|build-v\d+\.\d+\.\d+)$`, r.releaseBranchPrefix, releaseBranchTail), "release branch"); err != nil {
+		errs = append(errs, err)
 	}
 	// Check that we're not already on a git tag.
-	out, err := r.git("describe", "--exact-match", "--tags", "--match", command.VersionTags, "HEAD")
-	if err == nil {
-		// On a current tag.
-		return fmt.Errorf("already on a tag (%s), refusing to create release", out)
+	if out, err := r.git("describe", "--exact-match", "--tags", "--match", command.VersionTags, "HEAD"); err == nil {
+		errs = append(errs, fmt.Errorf("already on a tag (%s), refusing to create release", out))
 	}
 
 	// Check that the repository is not a shallow clone. We need correct history.
-	out, err = r.git("rev-parse", "--is-shallow-repository")
-	if err != nil {
-		return fmt.Errorf("rev-parse failed: %s", err)
-	}
-	if strings.TrimSpace(out) == "true" {
-		return fmt.Errorf("attempt to release from a shallow clone is not possible")
+	if out, err := r.git("rev-parse", "--is-shallow-repository"); err != nil {
+		errs = append(errs, fmt.Errorf("check for a shallow clone: %w", err))
+	} else if strings.TrimSpace(out) == "true" {
+		errs = append(errs, fmt.Errorf("attempt to release from a shallow clone is not possible"))
 	}
 
 	// Assert that manifests are using the correct version.
 	if err := manifests.AssertVersions(r.manifestValues(), manifests.WithRunner(r.runner)); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-
-	return r.releasePrereqs()
+	if err := r.releasePrereqs(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (r *CalicoManager) BuildHelm() error {
@@ -779,7 +766,7 @@ func (r *CalicoManager) releaseUploads() []distribution.Upload {
 			Remote:   r.repo.Remote,
 			RepoRoot: r.repoRoot,
 			Skip:     !r.gitRef,
-			DryRun:   r.planOptions.Local,
+			Local:    r.planOptions.Local,
 			Runner:   r.runner,
 		}),
 		github.ReleaseUpload(github.ReleaseOptions{
@@ -815,17 +802,19 @@ func (r *CalicoManager) PublishRelease() error {
 	if r.publishNodes != nil {
 		nodes = r.publishNodes
 	}
-	p, err := plan.New(r.planOptions, nodes()...)
-	if err != nil {
-		return err
-	}
-	return p.Run()
+	return r.runPlan(nodes())
 }
 
 func (r *CalicoManager) publishPlan() []plan.Node {
+	var validateFn func() error
+	if r.validate {
+		validateFn = func() error {
+			return images.Built(r.runner, r.operatorVersion, []string{r.operatorRegistry}, []string{r.operatorImage})
+		}
+	}
 	nodes := []plan.Node{
 		{Name: prepPublishStep, Validate: r.publishPrereqs},
-		r.operatorNode(),
+		r.operatorNode(validateFn),
 	}
 	for _, u := range r.uploads() {
 		nodes = append(nodes, distribution.Node(u, distribution.WithRunner(r.runner)))
@@ -838,7 +827,7 @@ func (r *CalicoManager) uploads() []distribution.Upload {
 	uploads := []distribution.Upload{
 		// images are never off: a skip resolves the earlier run's digests from the registry instead.
 		{
-			Handler:  distribution.Publisher{Kind: images.Step, Action: r.imagesAction()},
+			Handler:  distribution.Publisher{Kind: images.Step, Action: r.imagesAction(), Check: r.checkImagesBuilt},
 			Requires: r.beforeImagesPublish(),
 		},
 		{
@@ -931,74 +920,21 @@ func (r *CalicoManager) hashreleasePrereqs() error {
 	if r.publishHashrelease && !r.hashreleaseConfig.Valid() {
 		return fmt.Errorf("missing hashrelease server configuration")
 	}
-	if !r.images {
+	return nil
+}
+
+// checkImagesBuilt reads the image list from make, so it runs only when the
+// images publish.
+func (r *CalicoManager) checkImagesBuilt() error {
+	if !r.validate || !r.images || r.retagImages {
 		return nil
 	}
-	return r.assertImageVersions()
-}
-
-// Check that the images exists with the correct version.
-func (r *CalicoManager) assertImageVersions() error {
-	logrus.Info("Checking built images exists with the correct version")
-	buildInfoVersionRegex := regexp.MustCompile(`(?m)^Version:\s+(.*)$`)
-	list := r.releaseImages
-	if list == nil {
-		list = func() ([]string, error) { return images.ReleaseImages(r.runner, r.repoRoot) }
-	}
-	imgs, err := list()
+	dirs := images.VariantDirs(images.NarrowVariants(images.PublishVariants, r.imageReleaseDirs))
+	names, err := images.BuildImages(r.runner, r.repoRoot, dirs...)
 	if err != nil {
-		return fmt.Errorf("failed to determine release images: %w", err)
+		return err
 	}
-	for _, img := range imgs {
-		switch img {
-		case "calico":
-			for _, reg := range r.imageRegistries {
-				out, err := r.docker("run", "--rm", fmt.Sprintf("%s/%s:%s", reg, img, r.calicoVersion.String()), "version")
-				if err != nil {
-					return fmt.Errorf("failed to run get version from %s image: %s", img, err)
-				} else if len(buildInfoVersionRegex.FindStringSubmatch(out)) == 0 {
-					return fmt.Errorf("version does not match for image %s/%s:%s", reg, img, r.calicoVersion.String())
-				}
-			}
-		case "cni-windows", "node-windows":
-			// Skip windows images
-		case "third-party-cni-plugins", "envoy-gateway", "envoy-proxy", "envoy-ratelimit", "istio-install-cni", "istio-pilot", "istio-proxyv2", "istio-ztunnel", "whisker":
-			for _, reg := range r.imageRegistries {
-				out, err := r.docker("inspect", `--format='{{ index .Config.Labels "org.opencontainers.image.version" }}'`, fmt.Sprintf("%s/%s:%s", reg, img, r.calicoVersion.String()))
-				if err != nil {
-					return fmt.Errorf("failed to run get version from %s image: %s", img, err)
-				} else if !strings.Contains(out, r.calicoVersion.String()) {
-					return fmt.Errorf("version does not match for image %s/%s:%s", reg, img, r.calicoVersion.String())
-				}
-			}
-		case "node":
-			for _, reg := range r.imageRegistries {
-				out, err := r.docker("run", "--rm", fmt.Sprintf("%s/%s:%s", reg, img, r.calicoVersion.String()), "versions")
-				if err != nil {
-					return fmt.Errorf("failed to run get version from %s image: %s", img, err)
-				} else if len(buildInfoVersionRegex.FindStringSubmatch(out)) == 0 {
-					return fmt.Errorf("version does not match for image %s/%s:%s", reg, img, r.calicoVersion.String())
-				}
-			}
-		default:
-			return fmt.Errorf("unknown image: %s, update assertion to include validating image", img)
-		}
-	}
-	return r.assertOperatorImageVersion()
-}
-
-// assertOperatorImageVersion checks the operator image reports the version it was published at.
-// The operator publishes to registries of its own, so it is absent from the release images.
-func (r *CalicoManager) assertOperatorImageVersion() error {
-	img := fmt.Sprintf("%s/%s:%s", r.operatorRegistry, r.operatorImage, r.operatorVersion)
-	out, err := r.docker("inspect", `--format='{{ index .Config.Labels "org.opencontainers.image.version" }}'`, img)
-	if err != nil {
-		return fmt.Errorf("failed to get version from operator image %s: %w", img, err)
-	}
-	if !strings.Contains(out, r.operatorVersion) {
-		return fmt.Errorf("version does not match for image %s", img)
-	}
-	return nil
+	return images.Built(r.runner, r.calicoVersion.String(), r.imageRegistries, names)
 }
 
 // Prerequisites specific to publishing a release.
@@ -1036,11 +972,7 @@ func (r *CalicoManager) publishPrereqs() error {
 	if r.isHashRelease {
 		return r.hashreleasePrereqs()
 	}
-	// TODO: Verify all required artifacts are present.
-	if err := r.releasePrereqs(); err != nil {
-		return err
-	}
-	return r.assertImageVersions()
+	return r.releasePrereqs()
 }
 
 func (r *CalicoManager) mustPublishValidation() error {
@@ -1051,7 +983,7 @@ func (r *CalicoManager) mustPublishValidation() error {
 	if r.recordsDir == "" {
 		errs = errors.Join(errs, fmt.Errorf("no records directory specified"))
 	}
-	if err := r.validateGitHub(); err != nil {
+	if err := r.repo.Validate(); err != nil {
 		errs = errors.Join(errs, err)
 	}
 	return errs
@@ -1458,20 +1390,19 @@ func (r *CalicoManager) operatorConfig() operator.Operator {
 }
 
 func (r *CalicoManager) publishHelmCharts() error {
-	return charts.Publish(r.chart(), r.helmRegistries, r.recordsDir, !r.planOptions.Local,
+	return charts.Publish(
+		r.chart(), r.helmRegistries, r.recordsDir, !r.planOptions.Local,
 		charts.WithRunner(r.runner),
 		charts.WithLogsDir(r.logsDir),
 		charts.WithResolver(r.digestResolver()),
 	)
 }
 
-func (r *CalicoManager) buildReleaseNotes() error {
-	// A hashrelease previews the next release, so its notes are for that version.
-	ver, err := version.DetermineReleaseVersion(r.calicoVersion, r.devTagIdentifier)
-	if err != nil {
-		return fmt.Errorf("determine release version: %w", err)
-	}
-	_, err = outputs.ReleaseNotes(github.Client(r.runner), r.repo.Owner, r.repoRoot, filepath.Join(r.outputDir, outputs.ReleaseNotesDir), ver)
+// buildReleaseNotes writes a release's notes into the repo, for the prep commit.
+// A hashrelease previews the next release, so its notes are for that version
+// and go to the output dir.
+func (r *CalicoManager) buildReleaseNotes(outDir string, ver version.Version) error {
+	_, err := outputs.ReleaseNotes(github.Client(r.runner), r.repo.Owner, r.repoRoot, outDir, ver)
 	return err
 }
 
@@ -1503,434 +1434,14 @@ func (r *CalicoManager) determineBranch() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func (r *CalicoManager) docker(args ...string) (string, error) {
-	return r.runner.Run("docker", args)
-}
-
 func (r *CalicoManager) git(args ...string) (string, error) {
 	return command.Git(r.runner).In(r.repoRoot).Run(args...)
 }
 
-func (r *CalicoManager) validateGitHub() error {
-	var errs error
-	if r.repo.Remote == "" {
-		errs = errors.Join(errs, fmt.Errorf("no git remote specified"))
-	}
-	if err := r.repo.Validate(); err != nil {
-		errs = errors.Join(errs, err)
-	}
-	if errs != nil {
-		return errs
-	}
-	logrus.WithFields(logrus.Fields{
-		"remote": r.repo.Remote,
-		"repo":   r.repo,
-	}).Info("Using GitHub configuration")
-	return nil
-}
-
-func (r *CalicoManager) releaseBranchPrereqs() error {
-	var err error
-	// cutOptions is required for the branch cut flow
-	if r.cutOptions == nil {
-		err = errors.Join(err, fmt.Errorf("cut options not specified"))
-	}
-	if e := r.validateGitHub(); e != nil {
-		err = errors.Join(err, e)
-	}
-	return err
-}
-
-// branchChangedPaths are the trees the prepareDerived hook rewrites; it reports
-// them so the branch flow stages them into the cut commit.
-var branchChangedPaths = []string{
-	charts.DirName,
-	manifests.DirName,
-	".semaphore",
-	"test-tools",
-}
-
-// CutBranch cuts the release branch off main and advances main to the next
-// dev line.
-func (r *CalicoManager) CutBranch() error {
-	if err := r.releaseBranchPrereqs(); err != nil {
-		return err
-	}
-	d := &branch.Driver{
-		RepoRoot:            r.repoRoot,
-		Runner:              r.runner,
-		Remote:              r.repo.Remote,
-		MainBranch:          r.mainBranch,
-		DevTagIdentifier:    r.devTagIdentifier,
-		ReleaseBranchPrefix: r.releaseBranchPrefix,
-		Validate:            r.validate,
-		Publish:             r.gitRef,
-		DryRun:              r.planOptions.Local,
-		Plan:                r.cutOptions.OnlyPlan(),
-		BranchCheck:         r.cutOptions.CheckBranch(),
-		Skip:                r.cutOptions.SkipSteps(),
-		PrepareDerived:      r.prepareDerived,
-	}
-	plan, err := r.cutPlan()
+func (r *CalicoManager) runPlan(nodes []plan.Node) error {
+	p, err := plan.New(r.planOptions, nodes...)
 	if err != nil {
 		return err
 	}
-	if err := r.requireOnMainBranch(plan.Derived); err != nil {
-		return err
-	}
-	return d.CutReleaseBranch(plan)
-}
-
-// CutOptions is a branch.CutOptions implementation.
-type CutOptions struct {
-	Plan        bool
-	Skip        map[string]bool
-	BranchCheck bool
-}
-
-func (o CutOptions) OnlyPlan() bool             { return o.Plan }
-func (o CutOptions) SkipSteps() map[string]bool { return o.Skip }
-func (o CutOptions) CheckBranch() bool          { return o.BranchCheck }
-
-// requireOnMainBranch rejects a cut run off the main branch, since the cut
-// always derives from main regardless of the checkout.
-func (r *CalicoManager) requireOnMainBranch(derived string) error {
-	if !r.validate {
-		logrus.Warn("Skipping main branch validation")
-		return nil
-	}
-	_, err := command.Git(r.runner).In(r.repoRoot).Resolve("refs/heads/" + derived)
-	if err == nil {
-		return nil // resume: the derived branch already exists
-	}
-	if !errors.Is(err, command.ErrGitRefNotFound) {
-		return err
-	}
-	cur, err := command.Git(r.runner).In(r.repoRoot).Branch()
-	if err != nil {
-		return fmt.Errorf("determining current branch: %w", err)
-	}
-	if cur != r.mainBranch {
-		return fmt.Errorf("branch cut must run on %s, but the current branch is %s", r.mainBranch, cur)
-	}
-	return nil
-}
-
-// cutPlan builds the plan: a release-vX.Y branch off main. Only main gets a new
-// tag (next minor); the branch inherits main's tag via the shared commit.
-func (r *CalicoManager) cutPlan() (*branch.CutPlan, error) {
-	// Read the version from main, not HEAD: the branch is cut from main and its
-	// name and tags must derive from main's commit.
-	mainVersion, err := command.Git(r.runner).In(r.repoRoot).LatestTag(r.mainBranch)
-	if err != nil {
-		return nil, fmt.Errorf("determining %s version: %w", r.mainBranch, err)
-	}
-	cur, err := version.New(mainVersion)
-	if err != nil {
-		return nil, err
-	}
-	nextBranch := cur.NextBranchVersion()
-	return &branch.CutPlan{
-		Derived: version.NewReleaseBranch(r.releaseBranchPrefix, cur).String(),
-		Source:  r.mainBranch,
-		Remote:  r.repo.Remote,
-		TagTargets: []branch.TagTarget{
-			{Branch: r.mainBranch, DevTag: nextBranch.String() + "-" + r.devTagIdentifier},
-		},
-	}, nil
-}
-
-// derivedBranchEdits returns the edits to make in the freshly-cut-branch.
-func derivedBranchEdits(derived, stream string) []branch.Edit {
-	return []branch.Edit{
-		{File: "test-tools/mocknode/mock-node.yaml", Pattern: `([a-zA-Z .]+)([a-zA-Z.]+/mock-node:)[^[:space:]]+`, Replacement: fmt.Sprintf(`${1}${2}%s`, derived)},
-		{File: "process/testing/aso/export-env.sh", Pattern: `export RELEASE_STREAM="\$\{RELEASE_STREAM:=[a-zA-Z0-9.-]+\}"`, Replacement: fmt.Sprintf(`export RELEASE_STREAM="$${RELEASE_STREAM:=%s}"`, stream)},
-		{File: "process/testing/aso/install-calico.sh", Pattern: `: \$\{RELEASE_STREAM:="[a-zA-Z0-9.-]+"\} # Default to [a-zA-Z0-9.-]+`, Replacement: fmt.Sprintf(`: $${RELEASE_STREAM:="%s"} # Default to %s`, stream, stream)},
-	}
-}
-
-// prepareDerived is the PrepareDerived hook: on a fresh branch it applies the
-// edits, rewrites helm values, and runs code generation, returning changed files.
-func (r *CalicoManager) prepareDerived(derived string) ([]string, error) {
-	rb, ok := version.ParseReleaseBranch(r.releaseBranchPrefix, derived)
-	if !ok {
-		return nil, fmt.Errorf("%s is not a %s release branch", derived, r.releaseBranchPrefix)
-	}
-	written, _, err := branch.ApplyEdits(r.repoRoot, derivedBranchEdits(derived, rb.Stream))
-	if err != nil {
-		return nil, err
-	}
-
-	// The operator ships on Calico's version stream, so a pre-release branch
-	// pins both to the derived branch.
-	logrus.WithField("version", derived).Debug("Updating versions in helm charts to release branches")
-	if err := r.modifyHelmChartsValues(derived, derived); err != nil {
-		return nil, err
-	}
-
-	logrus.Debug("Running code generation")
-	env := []string{fmt.Sprintf("DEFAULT_BRANCH_OVERRIDE=%s", derived)}
-	if _, err := command.Make(r.runner, r.repoRoot).Run([]string{"generate"}, command.WithEnv(env...)); err != nil {
-		return nil, fmt.Errorf("failed to run code generation: %w", err)
-	}
-
-	// The helm and generate steps rewrite these tracked trees; stage them alongside
-	// the edit-written files.
-	changed := append(written, branchChangedPaths...)
-	return changed, nil
-}
-
-func (r *CalicoManager) prepareReleaseCleanup(baseBranch, prepBranch string) {
-	curr, err := r.determineBranch()
-	if err != nil {
-		logrus.WithError(err).Error("Failed to determine current branch during cleanup")
-		return
-	}
-	if curr == baseBranch {
-		return
-	}
-	if curr == prepBranch {
-		logrus.Warnf("An error occurred while preparing the %s release, investigate the issue and fix if necessary.\nTo re-run the release preparation, use the following command:\n\n\tgit switch -f %s", prepBranch, baseBranch)
-		return
-	}
-	logrus.WithField("branch", curr).Warn("Unexpected branch during release preparation cleanup, expected to be on base or prep branch")
-}
-
-// PrepareRelease performs release preparation for Calico.
-// It validates the repo state, creates a build branch, updates version references
-// in charts and manifests, and commits the changes.
-// If publishTag is true, the branch is pushed to the remote.
-func (r *CalicoManager) PrepareRelease() (string, error) {
-	if err := r.prepPrereqs(); err != nil {
-		return "", err
-	}
-
-	ver := r.calicoVersion
-	baseBranch, err := r.determineBranch()
-	if err != nil {
-		logrus.WithError(err).Error("Failed to determine current branch, will use default branch for release preparation")
-		baseBranch = version.NewReleaseBranch(r.releaseBranchPrefix, ver).String()
-		logrus.WithField("baseBranch", baseBranch).Info("Using default branch for release preparation")
-	}
-	prepBranch := r.prepBranchName()
-
-	defer r.prepareReleaseCleanup(baseBranch, prepBranch)
-
-	if r.beforePrep != nil {
-		if err := r.beforePrep(); err != nil {
-			return "", err
-		}
-	}
-
-	if err := r.switchToPrepBranch(prepBranch); err != nil {
-		return "", err
-	}
-
-	if err := r.updateAndCommitPrep(baseBranch); err != nil {
-		return "", err
-	}
-
-	return prepBranch, r.pushPrepBranch(baseBranch, prepBranch)
-}
-
-func (r *CalicoManager) prepBranchName() string {
-	return "build-" + r.calicoVersion.String()
-}
-
-// switchToPrepBranch records the current branch for cleanup, then creates
-// and switches to the prep branch. Safe to re-run (force-creates).
-func (r *CalicoManager) switchToPrepBranch(prepBranch string) error {
-	if _, err := r.git("switch", "-C", prepBranch); err != nil {
-		return fmt.Errorf("create branch %s: %w", prepBranch, err)
-	}
-	return nil
-}
-
-var prepStagedPaths = func(repoRoot string) []string {
-	return []string{
-		filepath.Join(repoRoot, charts.DirName),
-		manifests.Dir(repoRoot),
-		filepath.Join(repoRoot, outputs.ReleaseNotesDir),
-	}
-}
-
-// updateAndCommitPrep updates charts and manifests, then stages and commits.
-func (r *CalicoManager) updateAndCommitPrep(baseBranch string) error {
-	if err := r.modifyHelmChartsValues(r.calicoVersion.String(), r.operatorVersion); err != nil {
-		return fmt.Errorf("failed to update chart versions: %w", err)
-	}
-	if _, err := command.Make(r.runner, r.repoRoot).Run([]string{"generate"}); err != nil {
-		return fmt.Errorf("failed to run make generate: %w", err)
-	}
-
-	if _, err := r.git(append([]string{"add"}, prepStagedPaths(r.repoRoot)...)...); err != nil {
-		return fmt.Errorf("failed to stage files: %w", err)
-	}
-	if _, err := r.git("commit", "-m", fmt.Sprintf("build: %s release", r.calicoVersion.String()),
-		"--trailer", gitTrailerReleaseBranch+": "+baseBranch); err != nil {
-		return fmt.Errorf("failed to commit changes: %w", err)
-	}
-	return nil
-}
-
-// pushPrepBranch pushes the prep branch to remote and creates a PR if not in local mode.
-func (r *CalicoManager) pushPrepBranch(baseBranch, prepBranch string) error {
-	if !r.gitRef {
-		logrus.WithField("branch", prepBranch).Warn("Local mode: skipping branch push and PR creation")
-		return r.switchToBaseBranch(baseBranch)
-	}
-
-	args := []string{"push", "--force-with-lease", r.repo.Remote, prepBranch}
-	if r.planOptions.Local {
-		args = append(args, "--dry-run")
-	}
-	if _, err := r.git(args...); err != nil {
-		return fmt.Errorf("failed to push %q branch: %w", prepBranch, err)
-	}
-	if r.planOptions.Local {
-		logrus.WithField("branch", prepBranch).Warn("Dry run, not creating PR")
-		return r.switchToBaseBranch(baseBranch)
-	}
-	logrus.WithField("branch", prepBranch).Info("Pushed preparation branch to remote")
-
-	return r.createPrepPR(baseBranch, prepBranch)
-}
-
-// createPrepPR creates a pull request for the prep branch.
-func (r *CalicoManager) createPrepPR(baseBranch, prepBranch string) error {
-	args := []string{
-		"pr", "create", "--fill",
-		"--repo", r.repo.FullName(),
-		"--base", baseBranch,
-		"--head", prepBranch,
-	}
-	if r.repo.Is(github.DefaultRepo()) {
-		args = append(args, []string{
-			"--reviewer", fmt.Sprintf("%s/release-team", r.repo.Owner),
-			"--label", "release-note-not-required,docs-not-required",
-		}...)
-	}
-	fallbackURL := r.repo.OpenPRsURL(prepBranch)
-	logrus.WithField("args", args).Debug("Creating PR for release preparation")
-	pr, err := r.runner.Run("./bin/gh", args, command.WithDir(r.repoRoot))
-	if err != nil {
-		pr = fallbackURL
-		var cmdErr *command.Error
-		if errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "already exists") {
-			if m := regexp.MustCompile(`(?:^|\s)(https://\S+/pull/\d+)(?:$|\s)`).FindStringSubmatch(cmdErr.Stderr); len(m) > 1 {
-				if !strings.HasPrefix(m[1], r.repo.URL("pull")+"/") {
-					logrus.WithField("PR", pr).Warn("PR already exists but error returned an unexpected URL, find using fallback PR URL")
-					return fmt.Errorf("unexpected URL format for PR: %s", m[1])
-				}
-				pr = m[1]
-			}
-			logrus.WithField("PR", pr).Warn("PR already exists, skipping creation")
-			return r.switchToBaseBranch(baseBranch)
-		}
-		logrus.WithError(err).Error("Failed to create PR for release preparation")
-		return fmt.Errorf("failed to create PR: %s", err)
-	}
-	logrus.WithField("PR", strings.TrimSpace(pr)).Info("Created PR for release preparation")
-	return r.switchToBaseBranch(baseBranch)
-}
-
-func (r *CalicoManager) switchToBaseBranch(baseBranch string) error {
-	if _, err := r.git("switch", "-f", baseBranch); err != nil {
-		return fmt.Errorf("failed to switch back to base branch %s: %w", baseBranch, err)
-	}
-	return nil
-}
-
-func (r *CalicoManager) prepPrereqs() error {
-	if err := r.validateGitHub(); err != nil {
-		return err
-	}
-	if !r.validate {
-		logrus.Warn("Skipping release preparation validation")
-		return nil
-	}
-
-	// Check that the git repo is clean.
-	if dirty, err := command.Git(r.runner).In(r.repoRoot).Dirty(); err != nil {
-		return fmt.Errorf("failed to check if git repo is clean: %w", err)
-	} else if dirty {
-		return fmt.Errorf("there are uncommitted changes in the repository, please commit or stash them before preparing the release")
-	}
-
-	if err := r.checkBranch(func() error {
-		// Check that we're not on the default branch (master). We never prep releases from the default branch.
-		if branch, err := r.determineBranch(); err != nil {
-			return fmt.Errorf("failed to determine current git branch: %w", err)
-		} else if branch == defaultBranch {
-			return fmt.Errorf("cannot cut release from branch: %s", branch)
-		} else if r.gitRef && !strings.HasPrefix(branch, r.releaseBranchPrefix) {
-			return fmt.Errorf("current branch is %s, expected to be a release branch with prefix %s. Please switch to the appropriate release branch to cut the release", branch, r.releaseBranchPrefix)
-		}
-		if !r.gitRef {
-			return nil
-		}
-		// If publishing, check that we are not on a fork branch. We want to ensure releases are always cut from the main repo
-		owner, err := r.remoteOwner()
-		if err != nil {
-			return err
-		}
-		if owner != r.repo.Owner {
-			return fmt.Errorf("current git remote is %s, expected to be from %s. Please switch to a branch from the main repo to cut the release", owner, r.repo.Owner)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// The GitHub release links to the notes, so a release without one needs none.
-	if r.githubRelease {
-		if err := r.assertReleaseNotesPresent(r.calicoVersion.String()); err != nil {
-			return err
-		}
-	}
-
-	// Check that the versions are release version.
-	if !operatorReleaseVersionRe.MatchString(r.operatorVersion) {
-		return fmt.Errorf("operator version (%s) is not a release version", r.operatorVersion)
-	}
-	if !releaseVersionRe.MatchString(r.calicoVersion.String()) {
-		return fmt.Errorf("version (%s) is not a release version", r.calicoVersion.String())
-	}
-
-	return nil
-}
-
-// remoteOwner extracts the GitHub owner (org or user) from the configured git remote URL.
-func (r *CalicoManager) remoteOwner() (string, error) {
-	out, err := r.git("config", "--get", fmt.Sprintf("remote.%s.url", r.repo.Remote))
-	if err != nil {
-		return "", fmt.Errorf("failed to get remote %s url: %w", r.repo.Remote, err)
-	}
-	return ownerFromRemoteURL(strings.TrimSpace(out))
-}
-
-// ownerFromRemoteURL extracts the GitHub owner (org or user) from a git remote URL.
-// Supports SSH (git@github.com:owner/repo.git),
-// HTTPS (https://github.com/owner/repo.git), and variants without .git suffix.
-func ownerFromRemoteURL(raw string) (string, error) {
-	raw = strings.TrimSuffix(raw, ".git")
-
-	// SSH: git@github.com:owner/repo
-	if i := strings.Index(raw, ":"); i >= 0 && !strings.Contains(raw[:i], "/") {
-		parts := strings.Split(raw[i+1:], "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-2], nil
-		}
-		return "", fmt.Errorf("unable to determine owner from remote URL %q", raw)
-	}
-
-	// HTTPS: https://github.com/owner/repo — require scheme prefix.
-	if strings.Contains(raw, "://") {
-		parts := strings.Split(raw, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-2], nil
-		}
-	}
-
-	return "", fmt.Errorf("unable to determine owner from remote URL %q", raw)
+	return p.Run()
 }

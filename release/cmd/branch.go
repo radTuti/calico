@@ -20,9 +20,7 @@ import (
 
 	cli "github.com/urfave/cli/v3"
 
-	"github.com/projectcalico/calico/release/internal/branch"
 	"github.com/projectcalico/calico/release/internal/defaults"
-	"github.com/projectcalico/calico/release/internal/plan"
 	"github.com/projectcalico/calico/release/pkg/manager/calico"
 )
 
@@ -36,55 +34,47 @@ func branchCommand(cfg *Config) *cli.Command {
 	}
 }
 
-func branchSubCommands(cfg *Config) []*cli.Command {
+var branchSubCommands = func(cfg *Config) []*cli.Command {
 	return []*cli.Command{
-		// Cut a new release branch
-		{
-			Name:  "cut",
-			Usage: fmt.Sprintf("Cut a new release branch from %s", defaults.Branch),
-			Flags: []cli.Flag{
-				orgFlag,
-				repoFlag,
-				repoRemoteFlag,
-				mainBranchFlag,
-				releaseBranchPrefixFlag,
-				devTagSuffixFlag,
-				localFlag,
-				validationFlag,
-				planFlag,
-				skipFlag(branch.StepNames()),
-			},
-			Action: func(_ context.Context, c *cli.Command) error {
-				configureLogging("branch-cut.log")
-
-				calicoManager, err := calico.NewManager(
-					calico.WithRepo(c.String(orgFlag.Name), c.String(repoFlag.Name), c.String(repoRemoteFlag.Name)),
-					calico.WithRepoRoot(cfg.RepoRootDir),
-					calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
-					calico.WithMainBranch(c.String(mainBranchFlag.Name)),
-					calico.WithDevTagIdentifier(c.String(devTagSuffixFlag.Name)),
-					calico.WithValidation(c.Bool(validationFlag.Name)),
-					calico.WithPlanOptions(plan.Options{Local: c.Bool(localFlag.Name)}),
-					calico.WithBranchCutOptions(calico.CutOptions{
-						Plan:        c.Bool(planFlag.Name),
-						Skip:        skipSet(c.StringSlice(skipFlagName)),
-						BranchCheck: c.Bool(branchCheckFlagName),
-					}),
-				)
-				if err != nil {
-					return fmt.Errorf("calico manager: %w", err)
-				}
-
-				return calicoManager.CutBranch()
-			},
-		},
+		branchCutCommand(cfg),
 	}
 }
 
-func skipSet(ss []string) map[string]bool {
-	out := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		out[s] = true
+var (
+	branchCutFlags = []cli.Flag{
+		orgFlag,
+		repoFlag,
+		repoRemoteFlag,
+		mainBranchFlag,
+		releaseBranchPrefixFlag,
+		devTagSuffixFlag,
+		localFlag,
+		validationFlag,
+		planFlag,
+		skipFlag(calico.CutSteps()),
 	}
-	return out
+	branchCutAction = func(cfg *Config) func(ctx context.Context, c *cli.Command) error {
+		return func(_ context.Context, c *cli.Command) error {
+			configureLogging("branch-cut.log")
+
+			calicoManager, err := calico.NewManager(append(
+				managerOptions(cfg, c),
+				calico.WithMainBranch(c.String(mainBranchFlag.Name)),
+			)...)
+			if err != nil {
+				return fmt.Errorf("calico manager: %w", err)
+			}
+
+			return calicoManager.CutBranch()
+		}
+	}
+)
+
+func branchCutCommand(cfg *Config) *cli.Command {
+	return &cli.Command{
+		Name:   "cut",
+		Usage:  fmt.Sprintf("Cut a new release branch from %s", defaults.Branch),
+		Flags:  branchCutFlags,
+		Action: branchCutAction(cfg),
+	}
 }

@@ -34,7 +34,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/projectcalico/calico/release/internal/binaries"
@@ -379,290 +378,37 @@ func TestReleasePrereqsTagConflict(t *testing.T) {
 	}
 }
 
-func TestAssertImageVersions(t *testing.T) {
-	t.Run("checks the images it is given without sweeping", func(t *testing.T) {
-		const ver = "v3.30.0"
-		f := newFakeRunner().on("docker inspect", ver, nil)
-		r := &CalicoManager{
-			runner:          f,
-			calicoVersion:   testVersion(t, ver),
-			imageRegistries: []string{"quay.io/calico"},
-			releaseImages:   func() ([]string, error) { return []string{"whisker"}, nil },
-		}
-		if err := r.assertImageVersions(); err != nil {
-			t.Fatalf("assertImageVersions: %v", err)
-		}
-		if f.ran("make") {
-			t.Errorf("ran make, want the given list used: %v", f.calls())
-		}
-		if !f.ran("docker inspect") {
-			t.Errorf("did not inspect whisker: %v", f.calls())
-		}
-	})
-}
-
-func TestOwnerFromRemoteURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		url     string
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "SSH with .git suffix",
-			url:  "git@github.com:projectcalico/calico.git",
-			want: "projectcalico",
-		},
-		{
-			name: "SSH without .git suffix",
-			url:  "git@github.com:projectcalico/calico",
-			want: "projectcalico",
-		},
-		{
-			name: "HTTPS with .git suffix",
-			url:  "https://github.com/projectcalico/calico.git",
-			want: "projectcalico",
-		},
-		{
-			name: "HTTPS without .git suffix",
-			url:  "https://github.com/projectcalico/calico",
-			want: "projectcalico",
-		},
-		{
-			name: "SSH fork",
-			url:  "git@github.com:myFork/calico.git",
-			want: "myFork",
-		},
-		{
-			name: "HTTPS fork",
-			url:  "https://github.com/myFork/calico.git",
-			want: "myFork",
-		},
-		{
-			name: "SSH with nested path",
-			url:  "git@github.com:org/sub/repo.git",
-			want: "sub",
-		},
-		{
-			name:    "bare hostname no path",
-			url:     "github.com",
-			wantErr: true,
-		},
-		{
-			name:    "empty string",
-			url:     "",
-			wantErr: true,
-		},
-		{
-			name:    "local path",
-			url:     "/tmp/repo",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ownerFromRemoteURL(tt.url)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("ownerFromRemoteURL(%q) = %q, want error", tt.url, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("ownerFromRemoteURL(%q) error = %v", tt.url, err)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("ownerFromRemoteURL(%q) = %q, want %q", tt.url, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestCutPlanAdvancesMain asserts a cut off main emits no derived tag and
-// advances main to the next minor.
-func TestCutPlanAdvancesMain(t *testing.T) {
-	f := newFakeRunner().on("git describe --tags --match v[0-9]*.[0-9]*.[0-9]* --abbrev=0 master", "v3.33.0-0.dev", nil)
-	m := &CalicoManager{runner: f}
-	root := t.TempDir()
-	for _, opt := range []Option{
-		WithRepoRoot(root),
-		WithMainBranch("master"),
-		WithReleaseBranchPrefix("release"),
-		WithDevTagIdentifier("0.dev"),
-	} {
-		require.NoError(t, opt(m))
-	}
-
-	plan, err := m.cutPlan()
-	require.NoError(t, err)
-	require.Equal(t, "release-v3.33", plan.Derived)
-
-	var derivedTag, mainTag string
-	for _, tt := range plan.TagTargets {
-		switch tt.Branch {
-		case "release-v3.33":
-			derivedTag = tt.DevTag
-		case "master":
-			mainTag = tt.DevTag
-		}
-	}
-	require.Empty(t, derivedTag, "the derived branch inherits main's tag, so no new derived tag")
-	require.Equal(t, "v3.34.0-0.dev", mainTag, "main advances to the next minor")
-}
-
-func TestPrepareDerived(t *testing.T) {
-	t.Run("rejects a branch that is not a release branch", func(t *testing.T) {
-		f := newFakeRunner()
-		r := &CalicoManager{runner: f, repoRoot: t.TempDir(), releaseBranchPrefix: "release"}
-		if _, err := r.prepareDerived("master"); err == nil {
-			t.Fatal("want an error")
-		}
-		if len(f.calls()) > 0 {
-			t.Errorf("ran %v before rejecting the branch", f.calls())
-		}
-	})
-}
-
-func TestPrepareRelease(t *testing.T) {
-	t.Run("beforePrep runs on the base branch and its error stops the prep", func(t *testing.T) {
-		f := newFakeRunner()
-		f.on("git rev-parse --abbrev-ref HEAD", "release-v3.30\n", nil)
-		r := &CalicoManager{runner: f, repoRoot: t.TempDir(), repo: github.Repo{Owner: "projectcalico", Name: "calico", Remote: "origin"}, calicoVersion: testVersion(t, "v3.30.0"), releaseBranchPrefix: "release"}
-		r.beforePrep = func() error {
-			if f.ran("git switch") {
-				t.Errorf("switched branch before beforePrep (calls: %v)", f.calls())
-			}
-			return os.ErrInvalid
-		}
-		if _, err := r.PrepareRelease(); !errors.Is(err, os.ErrInvalid) {
-			t.Fatalf("PrepareRelease() = %v, want beforePrep's error", err)
-		}
-		if f.ran("git switch") {
-			t.Errorf("switched branch after beforePrep failed (calls: %v)", f.calls())
-		}
-	})
-
-	t.Run("records the base branch in the prep commit", func(t *testing.T) {
-		f := newFakeRunner()
-		f.on("git rev-parse --abbrev-ref HEAD", "release-v3.30\n", nil)
-		root := t.TempDir()
-		values, err := filepath.Glob("../../../../charts/*/values.yaml")
-		if err != nil || len(values) == 0 {
-			t.Fatalf("find chart values: %v", err)
-		}
-		for _, src := range values {
-			b, err := os.ReadFile(src)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dst := filepath.Join(root, "charts", filepath.Base(filepath.Dir(src)), "values.yaml")
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(dst, b, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		r := &CalicoManager{
-			runner: f, repoRoot: root, repo: github.Repo{Owner: "projectcalico", Name: "calico", Remote: "origin"}, calicoVersion: testVersion(t, "v3.30.0"),
-			releaseBranchPrefix: "release", imageRegistries: []string{"quay.io/calico"},
-			operatorImage: "tigera/operator", operatorVersion: "v1.38.0", operatorRegistry: "quay.io",
-		}
-		if _, err := r.PrepareRelease(); err != nil {
-			t.Fatalf("PrepareRelease() unexpected error: %v", err)
-		}
-		if want := "git commit -m build: v3.30.0 release --trailer Release-branch: release-v3.30"; !f.ran(want) {
-			t.Errorf("did not run %q (calls: %v)", want, f.calls())
-		}
-	})
-}
-
-func TestPrepPrereqs(t *testing.T) {
+func TestCheckImagesBuilt(t *testing.T) {
+	const ver = "v3.30.0"
 	for _, tc := range []struct {
-		name           string
-		remote         string
-		validateBranch bool
-		wantErr        bool
-		wantWarn       bool
+		name        string
+		images      bool
+		retag       bool
+		wantChecked bool
 	}{
-		{name: "main repo", remote: "git@github.com:projectcalico/calico.git", validateBranch: true},
-		{name: "fork", remote: "git@github.com:someone/calico.git", validateBranch: true, wantErr: true},
-		{name: "fork with the branch check off warns", remote: "git@github.com:someone/calico.git", wantWarn: true},
-		{name: "main repo with the branch check off", remote: "git@github.com:projectcalico/calico.git"},
+		{name: "checks the images it publishes", images: true, wantChecked: true},
+		{name: "off with images off"},
+		{name: "off on a retag", images: true, retag: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeRunner()
-			f.on("git rev-parse --abbrev-ref HEAD", "release-v3.30\n", nil)
-			f.on("git config --get remote.origin.url", tc.remote+"\n", nil)
+			f := newFakeRunner().
+				on("make -s --no-print-directory build-images", "whisker", nil).
+				on("docker inspect", ver, nil)
 			r := &CalicoManager{
-				runner: f, repoRoot: "/repo", repo: github.Repo{Owner: "projectcalico", Name: "calico", Remote: "origin"},
-				calicoVersion: testVersion(t, "v3.30.0"), operatorVersion: "v1.38.0",
-				releaseBranchPrefix: "release", validate: true, validateBranch: tc.validateBranch,
-				gitRef: true, planOptions: plan.Options{Local: true},
+				runner:           f,
+				repoRoot:         "/repo",
+				calicoVersion:    testVersion(t, ver),
+				imageRegistries:  []string{"quay.io/calico"},
+				imageReleaseDirs: []string{"whisker"},
+				validate:         true,
+				images:           tc.images,
+				retagImages:      tc.retag,
 			}
-			hook := logtest.NewGlobal()
-			t.Cleanup(hook.Reset)
-			err := r.prepPrereqs()
-			if got := err != nil && strings.Contains(err.Error(), "expected to be from"); got != tc.wantErr {
-				t.Errorf("prepPrereqs() = %v, want fork error %v", err, tc.wantErr)
+			if err := r.checkImagesBuilt(); err != nil {
+				t.Fatalf("checkImagesBuilt() unexpected error: %v", err)
 			}
-			var warned bool
-			for _, e := range hook.AllEntries() {
-				warned = warned || e.Message == "Using the wrong branch"
-			}
-			if warned != tc.wantWarn {
-				t.Errorf("warned = %v, want %v", warned, tc.wantWarn)
-			}
-		})
-	}
-
-	t.Run("a missing GitHub repo fails with validation off", func(t *testing.T) {
-		r := &CalicoManager{runner: newFakeRunner(), repoRoot: "/repo", repo: github.Repo{Remote: "origin"}}
-		if err := r.prepPrereqs(); err == nil {
-			t.Error("prepPrereqs() = nil, want an error")
-		}
-	})
-
-	t.Run("a missing git remote fails with validation off", func(t *testing.T) {
-		r := &CalicoManager{runner: newFakeRunner(), repoRoot: "/repo", repo: github.Repo{Owner: "projectcalico", Name: "calico"}}
-		if err := r.prepPrereqs(); err == nil {
-			t.Error("prepPrereqs() = nil, want an error")
-		}
-	})
-}
-
-func TestPushPrepBranch(t *testing.T) {
-	const push = "git push --force-with-lease origin build-v3.30.0"
-	for _, tc := range []struct {
-		name     string
-		gitRef   bool
-		local    bool
-		wantPush string
-		wantPR   bool
-	}{
-		{name: "pushes and opens a PR", gitRef: true, wantPush: push, wantPR: true},
-		{name: "dry run checks the push and opens no PR", gitRef: true, local: true, wantPush: push + " --dry-run"},
-		{name: "no git ref pushes nothing", local: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeRunner()
-			r := &CalicoManager{runner: f, repo: github.Repo{Remote: "origin"}, gitRef: tc.gitRef, planOptions: plan.Options{Local: tc.local}}
-			if err := r.pushPrepBranch("release-v3.30", "build-v3.30.0"); err != nil {
-				t.Fatalf("pushPrepBranch() unexpected error: %v", err)
-			}
-			if got := slices.ContainsFunc(f.calls(), func(c string) bool { return strings.HasPrefix(c, "git push") }); got != (tc.wantPush != "") {
-				t.Errorf("pushed = %v, want %v (calls: %v)", got, tc.wantPush != "", f.calls())
-			}
-			if tc.wantPush != "" && !slices.Contains(f.calls(), tc.wantPush) {
-				t.Errorf("did not run %q (calls: %v)", tc.wantPush, f.calls())
-			}
-			if got := f.ran("./bin/gh pr create"); got != tc.wantPR {
-				t.Errorf("opened a PR = %v, want %v (calls: %v)", got, tc.wantPR, f.calls())
-			}
-			if want := "git switch -f release-v3.30"; !f.ran(want) {
-				t.Errorf("did not switch back to the base branch (calls: %v)", f.calls())
+			if got := f.ran("docker inspect"); got != tc.wantChecked {
+				t.Errorf("inspected = %v, want %v (calls: %v)", got, tc.wantChecked, f.calls())
 			}
 		})
 	}
@@ -698,7 +444,13 @@ func TestAssertReleaseNotesPresent(t *testing.T) {
 		})
 	}
 	t.Run("build validation fails without notes", func(t *testing.T) {
-		r := &CalicoManager{repoRoot: t.TempDir(), calicoVersion: testVersion(t, ver)}
+		// HEAD carries a tag, so this also checks a later failure keeps the notes error.
+		r := &CalicoManager{
+			runner:          newFakeRunner(),
+			repoRoot:        t.TempDir(),
+			calicoVersion:   testVersion(t, ver),
+			imageRegistries: defaultRegistries,
+		}
 		if err := r.PreReleaseValidate(); err == nil || !strings.Contains(err.Error(), "release notes") {
 			t.Errorf("PreReleaseValidate() = %v, want a release notes error", err)
 		}
@@ -754,37 +506,6 @@ func TestBuildNodes(t *testing.T) {
 			}
 		}
 	})
-}
-
-func TestRequireOnMainBranch(t *testing.T) {
-	const verify = "git rev-parse --verify --quiet refs/heads/release-v3.33"
-	for _, tc := range []struct {
-		name    string
-		current string
-		derived string
-		wantErr bool
-	}{
-		{name: "a fresh cut on master is allowed", current: "master"},
-		{name: "a fresh cut off master is rejected", current: "some-feature", wantErr: true},
-		{name: "a resume is allowed off master once the derived branch exists", current: "release-v3.33", derived: "abc123"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeRunner().on("git rev-parse --abbrev-ref HEAD", tc.current, nil)
-			if tc.derived != "" {
-				f.on(verify, tc.derived, nil)
-			} else {
-				f.on(verify, "", errNoGitRef)
-			}
-			m := &CalicoManager{runner: f, repoRoot: "/repo", mainBranch: "master", validate: true}
-			err := m.requireOnMainBranch("release-v3.33")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("requireOnMainBranch() = %v, want error %v", err, tc.wantErr)
-			}
-			if err != nil && !strings.Contains(err.Error(), "must run on master") {
-				t.Errorf("error %q does not name the main branch", err)
-			}
-		})
-	}
 }
 
 // envForDir returns the environment of the first recorded make call in a
@@ -1874,22 +1595,6 @@ func TestPublishPrereqs(t *testing.T) {
 			t.Error("publishPrereqs() = nil, want an error")
 		}
 	})
-
-	t.Run("a missing git remote fails with validation off", func(t *testing.T) {
-		r := &CalicoManager{runner: newFakeRunner(), repoRoot: "/repo", repo: github.Repo{Owner: "projectcalico", Name: "calico"}, outputDir: t.TempDir(), recordsDir: t.TempDir()}
-		if err := r.publishPrereqs(); err == nil {
-			t.Error("publishPrereqs() = nil, want an error")
-		}
-	})
-}
-
-func TestReleaseBranchPrereqs(t *testing.T) {
-	t.Run("a missing git remote fails with validation off", func(t *testing.T) {
-		r := &CalicoManager{cutOptions: &CutOptions{}}
-		if err := r.releaseBranchPrereqs(); err == nil {
-			t.Error("releaseBranchPrereqs() = nil, want an error")
-		}
-	})
 }
 
 func TestChartsAndIndexLocation(t *testing.T) {
@@ -1911,37 +1616,6 @@ func TestChartsAndIndexLocation(t *testing.T) {
 			if got := charts.IndexDir(dir); got != want {
 				t.Errorf("IndexDir = %q, want %q", got, want)
 			}
-		})
-	}
-}
-
-func TestAssertOperatorImageVersion(t *testing.T) {
-	const version = "v1.42.0"
-	for _, tt := range []struct {
-		name    string
-		label   string
-		wantErr bool
-	}{
-		{name: "image reports the published version", label: version},
-		{name: "image reports another version", label: "v1.41.0", wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeRunner().on("docker inspect", tt.label, nil)
-			r := &CalicoManager{
-				runner:           f,
-				operatorRegistry: "quay.io/tigera",
-				operatorImage:    "operator",
-				operatorVersion:  version,
-			}
-
-			err := r.assertOperatorImageVersion()
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			require.Len(t, f.calls(), 1)
-			require.Contains(t, f.calls()[0], "quay.io/tigera/operator:"+version)
 		})
 	}
 }
@@ -2125,6 +1799,61 @@ func TestPublishNodes(t *testing.T) {
 				}
 				before[n.Name] = true
 			}
+		}
+	})
+
+	t.Run("only the publish plan checks the operator image", func(t *testing.T) {
+		const version = "v1.42.0"
+		operatorValidate := func(nodes []plan.Node) func() error {
+			i := slices.IndexFunc(nodes, func(n plan.Node) bool { return n.Name == operator.Step })
+			if i < 0 {
+				t.Fatalf("no %s node", operator.Step)
+			}
+			return nodes[i].Validate
+		}
+		for _, tc := range []struct {
+			name     string
+			build    bool
+			validate bool
+			label    string
+			wantErr  bool
+		}{
+			{name: "image reports the published version", validate: true, label: version},
+			{name: "image reports another version", validate: true, label: "v1.41.0", wantErr: true},
+			{name: "off with validation off", label: "v1.41.0"},
+			{name: "off in the build plan", build: true, validate: true, label: "v1.41.0"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newFakeRunner().on("docker inspect", tc.label, nil)
+				r := &CalicoManager{
+					runner:           f,
+					calicoVersion:    testVersion(t, "v3.30.0"),
+					outputDir:        t.TempDir(),
+					operator:         operator.Driver{Do: func() error { return nil }},
+					operatorRegistry: "quay.io/tigera",
+					operatorImage:    "operator",
+					operatorVersion:  version,
+					validate:         tc.validate,
+				}
+				nodes := r.publishPlan()
+				if tc.build {
+					nodes = r.buildPlan()
+				}
+				check := operatorValidate(nodes)
+				wantCheck := tc.validate && !tc.build
+				if (check != nil) != wantCheck {
+					t.Fatalf("operator Validate set = %v, want %v", check != nil, wantCheck)
+				}
+				if check == nil {
+					return
+				}
+				if err := check(); (err != nil) != tc.wantErr {
+					t.Fatalf("Validate() = %v, want error %v", err, tc.wantErr)
+				}
+				if !f.ran("docker inspect --format {{ index .Config.Labels \"org.opencontainers.image.version\" }} quay.io/tigera/operator:" + version) {
+					t.Errorf("did not inspect the operator image (calls: %v)", f.calls())
+				}
+			})
 		}
 	})
 
@@ -2701,52 +2430,4 @@ func testVersion(t testing.TB, s string) version.Version {
 		t.Fatal(err)
 	}
 	return v
-}
-
-func TestCreatePrepPR(t *testing.T) {
-	const existing = "https://github.com/someorg/somerepo/pull/42"
-	tests := []struct {
-		name    string
-		ghErr   error
-		wantErr bool
-	}{
-		{
-			name: "existing PR switches back to the base branch",
-			ghErr: &command.Error{
-				Stderr: "a pull request for branch \"prep\" into branch \"master\" already exists:\n" + existing,
-				Err:    errors.New("exit status 1"),
-			},
-		},
-		{
-			name: "an existing PR in another repo is an error",
-			ghErr: &command.Error{
-				Stderr: "a pull request for branch \"prep\" into branch \"master\" already exists:\nhttps://github.com/otherorg/somerepo/pull/42",
-				Err:    errors.New("exit status 1"),
-			},
-			wantErr: true,
-		},
-		{
-			name:    "other failure is returned",
-			ghErr:   &command.Error{Stderr: "HTTP 502", Err: errors.New("exit status 1")},
-			wantErr: true,
-		},
-		{
-			name:    "already exists outside stderr is not an existing PR",
-			ghErr:   errors.New("already exists"),
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newFakeRunner().on("./bin/gh pr create", "", tt.ghErr)
-			r := &CalicoManager{runner: f, repo: github.Repo{Owner: "someorg", Name: "somerepo"}}
-			err := r.createPrepPR("master", "prep")
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("createPrepPR() = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got := f.ran("git switch -f master"); got == tt.wantErr {
-				t.Errorf("switched back to base = %v, want %v", got, !tt.wantErr)
-			}
-		})
-	}
 }

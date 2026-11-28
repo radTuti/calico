@@ -76,7 +76,7 @@ func checkoutBranch(g command.GitRunner, name string) error {
 
 // stageAndCommit commits paths with msg, returning whether it committed.
 // Scoped to paths so a dirty-tree resume cannot sweep in unrelated staged changes.
-func stageAndCommit(g command.GitRunner, msg string, paths []string) (bool, error) {
+func stageAndCommit(g command.GitRunner, msg string, trailers, paths []string) (bool, error) {
 	if len(paths) == 0 {
 		return false, nil
 	}
@@ -92,7 +92,11 @@ func stageAndCommit(g command.GitRunner, msg string, paths []string) (bool, erro
 	if cerr, ok := errors.AsType[*command.Error](err); !ok || cerr.ExitCode != 1 {
 		return false, fmt.Errorf("git diff: %w", err)
 	}
-	commit := append([]string{"commit", "-m", msg, "--"}, paths...)
+	commit := []string{"commit", "-m", msg}
+	for _, t := range trailers {
+		commit = append(commit, "--trailer", t)
+	}
+	commit = append(append(commit, "--"), paths...)
 	if _, err := g.Run(commit...); err != nil {
 		return false, fmt.Errorf("git commit: %w", err)
 	}
@@ -126,11 +130,17 @@ func tagWithEmptyCommit(g command.GitRunner, branch, tagName string) error {
 	if err := checkoutBranch(g, branch); err != nil {
 		return err
 	}
-	if _, err := g.Run("commit", "--allow-empty", "-m", "Begin development for "+tagName); err != nil {
+	if _, err := g.Run("commit", "--allow-empty", "-m", DevCommitMessage(tagName)); err != nil {
 		return fmt.Errorf("create commit on %s: %w", branch, err)
 	}
 	// A remote collision is advanced past earlier, so any tag met here is local-only.
 	return CreateTag(g, tagName, MoveTag())
+}
+
+// DevCommitMessage marks the commit that carries tag on main, so a caller can
+// spot a cut that already advanced it.
+func DevCommitMessage(tag string) string {
+	return "Begin development for " + tag
 }
 
 // tagHead tags branch's head with no new commit, for the derived branch whose
@@ -140,6 +150,22 @@ func tagHead(g command.GitRunner, branch, tagName string) error {
 		return err
 	}
 	return CreateTag(g, tagName, MoveTag())
+}
+
+// remoteRefAtLocal fails unless ref is on remote at its local commit.
+func remoteRefAtLocal(g command.GitRunner, remote, ref string) error {
+	localSha, err := g.Resolve(ref)
+	if err != nil {
+		return err
+	}
+	present, matches, err := remoteRefMatches(g, remote, ref, localSha)
+	if err != nil {
+		return err
+	}
+	if !present || !matches {
+		return fmt.Errorf("%s is not on %s at %s", ref, remote, localSha)
+	}
+	return nil
 }
 
 // remoteRefMatches reports whether ref exists on remote and whether it points at
@@ -164,11 +190,18 @@ func remoteRefMatches(g command.GitRunner, remote, ref, localSha string) (presen
 	return present, false, nil
 }
 
-// pushRefs pushes the given refs to remote.
-func pushRefs(g command.GitRunner, remote string, dryRun bool, refs ...string) error {
+// pushRefs pushes refs to remote. local passes --dry-run, which writes nothing.
+func pushRefs(g command.GitRunner, remote string, local, force bool, refs ...string) error {
+	// git push with no refs pushes the configured default, never what was meant.
+	if len(refs) == 0 {
+		return nil
+	}
 	args := []string{"push", remote}
-	if dryRun {
+	if local {
 		args = append(args, "--dry-run")
+	}
+	if force {
+		args = append(args, "--force-with-lease")
 	}
 	args = append(args, refs...)
 	_, err := g.Run(args...)
@@ -177,7 +210,7 @@ func pushRefs(g command.GitRunner, remote string, dryRun bool, refs ...string) e
 
 // checkBranchCurrent verifies branch's local tip equals its remote counterpart,
 // never moving it. recovery is the fix hint shown when it is not current.
-func checkBranchCurrent(g command.GitRunner, branch, remote string, requireCurrent, report bool, recovery string) error {
+func checkBranchCurrent(g command.GitRunner, branch, remote string, requireCurrent bool, recovery string) error {
 	// An empty remote reads the branch's upstream from .git/config. A missing or
 	// broken upstream is an error: without it the cut cannot verify the branch is
 	// current, so the operator must set a valid tracking branch first.
@@ -209,13 +242,9 @@ func checkBranchCurrent(g command.GitRunner, branch, remote string, requireCurre
 	// Not current: any difference, or no counterpart on the remote. recovery is
 	// the caller's fix hint.
 	reason := fmt.Sprintf("%s is not in sync with %s", branch, upstream)
-	switch {
-	case report:
-		logrus.Warnf("%s; a cut will error unless resolved: %s", reason, recovery)
-	case requireCurrent:
+	if requireCurrent {
 		return fmt.Errorf("%s; %s", reason, recovery)
-	default:
-		logrus.Warnf("%s; cutting from the local branch as is", reason)
 	}
+	logrus.Warnf("%s; cutting from the local branch as is", reason)
 	return nil
 }

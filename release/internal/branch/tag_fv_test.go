@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
+	"github.com/projectcalico/calico/release/internal/plan"
 )
 
 // tagReleased tags HEAD as a release, then commits past it so the tag is not main's head.
@@ -56,16 +58,17 @@ func TestCutFromTag(t *testing.T) {
 		}
 
 		derived := "release-v3.23.1-hotfix"
-		d := newTestDriver(t, Driver{
-			RepoRoot: root,
+		d := newTestDriver(t, root, WithPublish(true))
+		err = runCut(d, Cut{
+			Derived:  derived,
+			Source:   TagSource("v3.23.1"),
 			Validate: true,
-			Publish:  true,
 			PrepareDerived: func(string) ([]string, error) {
 				writeFile(t, root, "metadata.mk", "MANAGER_BRANCH ?= "+derived+"\n")
 				return []string{"metadata.mk"}, nil
 			},
 		})
-		if err := d.CutReleaseBranch(&CutPlan{Derived: derived, Source: TagSource("v3.23.1"), Remote: "origin"}); err != nil {
+		if err != nil {
 			t.Fatal(err)
 		}
 
@@ -119,11 +122,11 @@ func TestCutFromTag(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		d := newTestDriver(t, Driver{RepoRoot: root, Validate: true, Publish: true})
-		err = d.CutReleaseBranch(&CutPlan{
+		d := newTestDriver(t, root, WithPublish(true))
+		err = runCut(d, Cut{
 			Derived:    "release-v3.23.1-hotfix",
 			Source:     TagSource("v3.23.1"),
-			Remote:     "origin",
+			Validate:   true,
 			TagTargets: []TagTarget{{Branch: "master", DevTag: "v3.24.0-0.dev"}},
 		})
 		if err == nil || !strings.Contains(err.Error(), "a cut from v3.23.1 cannot advance master") {
@@ -148,8 +151,8 @@ func TestCutFromTag(t *testing.T) {
 		initGitRemote(t, root)
 		tagReleased(t, root, "v3.23.2", false)
 
-		d := newTestDriver(t, Driver{RepoRoot: root, Validate: true, Plan: true})
-		if err := d.CutReleaseBranch(&CutPlan{Derived: "release-v3.23.2-hotfix", Source: TagSource("v3.23.2"), Remote: "origin"}); err != nil {
+		d := newTestDriver(t, root, WithPlanOptions(plan.Options{Preview: true}))
+		if err := runCut(d, Cut{Derived: "release-v3.23.2-hotfix", Source: TagSource("v3.23.2"), Validate: true}); err != nil {
 			t.Fatal(err)
 		}
 		if branchExists(t, realGit(root), "release-v3.23.2-hotfix") {
@@ -164,37 +167,31 @@ func TestCutFromTag(t *testing.T) {
 		g := realGit(root)
 
 		tagReleased(t, root, "v3.23.1", true)
-		if err := checkTagOnRemote(g, "v3.23.1", "origin", false); err != nil {
+		if err := checkTagOnRemote(g, "v3.23.1", "origin"); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := checkTagOnRemote(g, "v3.23.9", "origin", false); err == nil || !strings.Contains(err.Error(), "does not exist locally") {
+		if err := checkTagOnRemote(g, "v3.23.9", "origin"); err == nil || !strings.Contains(err.Error(), "does not exist locally") {
 			t.Fatalf("error = %v, want one containing %q", err, "does not exist locally")
 		}
 
 		tagReleased(t, root, "v3.23.2", false)
-		if err := checkTagOnRemote(g, "v3.23.2", "origin", false); err == nil || !strings.Contains(err.Error(), "is not on origin") {
+		if err := checkTagOnRemote(g, "v3.23.2", "origin"); err == nil || !strings.Contains(err.Error(), "is not on origin") {
 			t.Fatalf("error = %v, want one containing %q", err, "is not on origin")
 		}
 		// Plan mode previews the cut with a warning instead.
-		if err := checkTagOnRemote(g, "v3.23.2", "origin", true); err != nil {
-			t.Fatal(err)
-		}
 
 		// A local tag that moved from what was released is rejected.
 		_, err := realGit(root).Run("tag", "-f", "-a", "v3.23.1", "-m", "moved")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := checkTagOnRemote(g, "v3.23.1", "origin", false); err == nil || !strings.Contains(err.Error(), "does not match") {
+		if err := checkTagOnRemote(g, "v3.23.1", "origin"); err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("error = %v, want one containing %q", err, "does not match")
-		}
-		if err := checkTagOnRemote(g, "v3.23.1", "origin", true); err != nil {
-			t.Fatal(err)
 		}
 
 		// A remote that cannot be queried fails even in plan mode.
-		if err := checkTagOnRemote(g, "v3.23.1", "no-such-remote", true); err == nil || !strings.Contains(err.Error(), "checking refs/tags/v3.23.1 on no-such-remote") {
+		if err := checkTagOnRemote(g, "v3.23.1", "no-such-remote"); err == nil || !strings.Contains(err.Error(), "checking refs/tags/v3.23.1 on no-such-remote") {
 			t.Fatalf("error = %v, want one containing %q", err, "checking refs/tags/v3.23.1 on no-such-remote")
 		}
 	})

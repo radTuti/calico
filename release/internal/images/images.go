@@ -53,6 +53,8 @@ const (
 	WindowsVariant = "windows"
 )
 
+const versionLabel = "org.opencontainers.image.version"
+
 var (
 	// StandardReleaseDirs are the component directories whose Makefiles
 	// publish standalone images via release-build/release-publish.
@@ -120,6 +122,29 @@ func ReleaseImages(r command.CommandRunner, rootDir string) ([]string, error) {
 		return nil, fmt.Errorf("building release images list for release dirs[%s]: %w", strings.Join(dirs, ","), err)
 	}
 	return imgs, nil
+}
+
+// Built checks each image's version label in each registry.
+// Windows images are skipped as they build on another host.
+func Built(r command.CommandRunner, version string, registries, names []string) error {
+	var errs []error
+	for _, name := range names {
+		if strings.HasSuffix(name, "-"+WindowsVariant) {
+			continue
+		}
+		for _, reg := range registries {
+			ref := fmt.Sprintf("%s/%s:%s", reg, name, version)
+			out, err := r.Run("docker", []string{"inspect", "--format", `{{ index .Config.Labels "` + versionLabel + `" }}`, ref})
+			if err != nil {
+				errs = append(errs, fmt.Errorf("inspect %s: %w", ref, err))
+				continue
+			}
+			if got := strings.TrimSpace(out); got != version {
+				errs = append(errs, fmt.Errorf("%s has %s %q, want %q", ref, versionLabel, got, version))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // BuildImages returns every image built in dirs, whatever the variant.
@@ -653,7 +678,8 @@ func unitState(s settings, u unit, recorded registry.RecordedDigests) (done bool
 						return false, fmt.Errorf(
 							"%s is published at %s; this release recorded %s. "+
 								"Pass --force to republish over it",
-							image, got, strings.Join(slices.Sorted(maps.Keys(digests)), ", "))
+							image, got, strings.Join(slices.Sorted(maps.Keys(digests)), ", "),
+						)
 					}
 					return false, nil
 				}

@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/require"
 
 	"github.com/projectcalico/calico/release/internal/command"
 )
@@ -100,15 +99,16 @@ func TestStageAndCommit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := fakeRunner(allArgs, nil, map[string]error{diff: tc.diffErr})
-			got, err := stageAndCommit(command.Git(g), "msg", []string{"a.txt"})
+			got, err := stageAndCommit(command.Git(g), "msg", []string{"Key: value"}, []string{"a.txt"})
 			if (err != nil) != tc.wantErr {
 				t.Errorf("err = %v, want error %v", err, tc.wantErr)
 			}
 			if got != tc.want {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
-			if committed := ran(g, "commit"); committed != tc.want {
-				t.Errorf("ran commit = %v, want %v", committed, tc.want)
+			committed := ran(g, "commit -m msg --trailer Key: value -- a.txt")
+			if committed != tc.want {
+				t.Errorf("ran commit with the trailer = %v, want %v (calls: %v)", committed, tc.want, gitArgs(g))
 			}
 		})
 	}
@@ -152,39 +152,59 @@ func TestRemoteRefMatches(t *testing.T) {
 	// present and pointing at the local sha.
 	g := fakeRunner(firstTwo, map[string]string{"ls-remote origin": sha + "\trefs/heads/" + ref + "\n"}, nil)
 	present, matches, err := remoteRefMatches(command.Git(g), "origin", ref, sha)
-	require.NoError(t, err)
-	require.True(t, present)
-	require.True(t, matches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present {
+		t.Fatal("present = false, want true")
+	}
+	if !matches {
+		t.Fatal("matches = false, want true")
+	}
 
 	// present but pointing at a different sha.
 	other := "2222222222222222222222222222222222222222"
 	g2 := fakeRunner(firstTwo, map[string]string{"ls-remote origin": other + "\trefs/heads/" + ref + "\n"}, nil)
 	present, matches, err = remoteRefMatches(command.Git(g2), "origin", ref, sha)
-	require.NoError(t, err)
-	require.True(t, present)
-	require.False(t, matches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present {
+		t.Fatal("present = false, want true")
+	}
+	if matches {
+		t.Fatal("matches = true, want false")
+	}
 
 	// absent (empty ls-remote output).
 	g3 := &command.Recorder{}
 	present, matches, err = remoteRefMatches(command.Git(g3), "origin", ref, sha)
-	require.NoError(t, err)
-	require.False(t, present)
-	require.False(t, matches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		t.Fatal("present = true, want false")
+	}
+	if matches {
+		t.Fatal("matches = true, want false")
+	}
 }
 
 func TestPushRefs(t *testing.T) {
 	branch, tag := testPrefix+"-v3.33-2", "v3.33.0-2.0-"+testSuffix
 	for _, tc := range []struct {
-		name   string
-		dryRun bool
-		want   []string
+		name           string
+		local          bool
+		forceWithLease bool
+		want           []string
 	}{
 		{name: "pushes the refs", want: []string{"push", "origin", branch, tag}},
-		{name: "dry run", dryRun: true, want: []string{"push", "origin", "--dry-run", branch, tag}},
+		{name: "local", local: true, want: []string{"push", "origin", "--dry-run", branch, tag}},
+		{name: "force with lease", forceWithLease: true, want: []string{"push", "origin", "--force-with-lease", branch, tag}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &command.Recorder{}
-			if err := pushRefs(command.Git(g), "origin", tc.dryRun, branch, tag); err != nil {
+			if err := pushRefs(command.Git(g), "origin", tc.local, tc.forceWithLease, branch, tag); err != nil {
 				t.Fatalf("pushRefs() unexpected error: %v", err)
 			}
 			if diff := cmp.Diff([][]string{tc.want}, gitArgs(g)); diff != "" {
@@ -218,47 +238,60 @@ func TestCheckBranchCurrent(t *testing.T) {
 
 	t.Run("current: local equals remote", func(t *testing.T) {
 		g := fakeGit(equalTips(sha, sha), nil)
-		require.NoError(t, checkBranchCurrent(g, src, "origin", true, false, fix))
+		if err := checkBranchCurrent(g, src, "origin", true, fix); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("diverged + branch-check: error carries the recovery hint", func(t *testing.T) {
 		g := fakeGit(equalTips(sha, other), nil)
-		err := checkBranchCurrent(g, src, "origin", true, false, fix)
-		require.ErrorContains(t, err, "not in sync")
-		require.ErrorContains(t, err, "--no-branch-check")
+		err := checkBranchCurrent(g, src, "origin", true, fix)
+		if err == nil || !strings.Contains(err.Error(), "not in sync") {
+			t.Fatalf("err = %v, want it to contain %q", err, "not in sync")
+		}
+		if err == nil || !strings.Contains(err.Error(), "--no-branch-check") {
+			t.Fatalf("err = %v, want it to contain %q", err, "--no-branch-check")
+		}
 	})
 
 	t.Run("diverged + no-branch-check: warn, no error", func(t *testing.T) {
 		g := fakeGit(equalTips(sha, other), nil)
-		require.NoError(t, checkBranchCurrent(g, src, "origin", false, false, fix))
-	})
-
-	t.Run("diverged + report (--plan): no error", func(t *testing.T) {
-		g := fakeGit(equalTips(sha, other), nil)
-		require.NoError(t, checkBranchCurrent(g, src, "origin", true, true, fix))
+		if err := checkBranchCurrent(g, src, "origin", false, fix); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("main failure uses its own recovery hint, not --no-branch-check", func(t *testing.T) {
 		g := fakeGit(equalTips(sha, other), nil)
-		err := checkBranchCurrent(g, src, "origin", true, false, "run `git checkout main && git pull` before cutting")
-		require.ErrorContains(t, err, "git checkout main && git pull")
-		require.NotContains(t, err.Error(), "--no-branch-check")
+		err := checkBranchCurrent(g, src, "origin", true, "run `git checkout main && git pull` before cutting")
+		if err == nil || !strings.Contains(err.Error(), "git checkout main && git pull") {
+			t.Fatalf("err = %v, want it to contain %q", err, "git checkout main && git pull")
+		}
+		if strings.Contains(err.Error(), "--no-branch-check") {
+			t.Fatalf("%q contains %q", err.Error(), "--no-branch-check")
+		}
 	})
 
 	t.Run("absent on remote + branch-check: error", func(t *testing.T) {
 		// remote tip resolves empty -> not current.
 		g := fakeGit(map[string]string{"rev-parse --verify --quiet " + src: sha}, nil)
-		err := checkBranchCurrent(g, src, "origin", true, false, fix)
-		require.ErrorContains(t, err, "not in sync")
+		err := checkBranchCurrent(g, src, "origin", true, fix)
+		if err == nil || !strings.Contains(err.Error(), "not in sync") {
+			t.Fatalf("err = %v, want it to contain %q", err, "not in sync")
+		}
 	})
 
 	t.Run("empty remote, no configured upstream: error, no fetch", func(t *testing.T) {
 		g := fakeRunner(allArgs, nil, map[string]error{
 			"rev-parse --abbrev-ref --symbolic-full-name master@{upstream}": errFake,
 		})
-		err := checkBranchCurrent(command.Git(g), "master", "", true, false, fix)
-		require.ErrorContains(t, err, "no valid upstream")
-		require.False(t, ran(g, "fetch"), "a missing upstream must fail before fetching")
+		err := checkBranchCurrent(command.Git(g), "master", "", true, fix)
+		if err == nil || !strings.Contains(err.Error(), "no valid upstream") {
+			t.Fatalf("err = %v, want it to contain %q", err, "no valid upstream")
+		}
+		if ran(g, "fetch") {
+			t.Fatal("a missing upstream must fail before fetching")
+		}
 	})
 
 	t.Run("empty remote reads configured upstream", func(t *testing.T) {
@@ -267,14 +300,20 @@ func TestCheckBranchCurrent(t *testing.T) {
 			"rev-parse --verify --quiet master":                             sha,
 			"rev-parse --verify --quiet upstream/master":                    sha,
 		}, nil)
-		require.NoError(t, checkBranchCurrent(g, "master", "", true, false, fix))
+		if err := checkBranchCurrent(g, "master", "", true, fix); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
 func TestCreateBranch(t *testing.T) {
 	g := &command.Recorder{}
-	require.NoError(t, createBranch(command.Git(g), testPrefix+"-v3.33-2", testPrefix+"-v3.33-1"))
-	require.Equal(t, []string{"branch", testPrefix + "-v3.33-2", testPrefix + "-v3.33-1"}, gitArgs(g)[0])
+	if err := createBranch(command.Git(g), testPrefix+"-v3.33-2", testPrefix+"-v3.33-1"); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]string{"branch", testPrefix + "-v3.33-2", testPrefix + "-v3.33-1"}, gitArgs(g)[0]); diff != "" {
+		t.Fatalf("gitArgs(g)[0] (-want +got):\n%s", diff)
+	}
 }
 
 func TestTagWithEmptyCommit(t *testing.T) {
@@ -282,15 +321,29 @@ func TestTagWithEmptyCommit(t *testing.T) {
 	tag := "v3.33.0-2.0-" + testSuffix
 
 	g := &command.Recorder{}
-	require.NoError(t, tagWithEmptyCommit(command.Git(g), branch, tag))
-	require.Len(t, g.Calls(), 3)
-	require.Equal(t, []string{"checkout", branch}, gitArgs(g)[0])
-	require.Equal(t, []string{"commit", "--allow-empty", "-m", "Begin development for " + tag}, gitArgs(g)[1])
-	require.Equal(t, []string{"tag", "-f", "--no-sign", tag}, gitArgs(g)[2])
+	if err := tagWithEmptyCommit(command.Git(g), branch, tag); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(g.Calls()); got != 3 {
+		t.Fatalf("len(g.Calls()) = %d, want %d", got, 3)
+	}
+	if diff := cmp.Diff([]string{"checkout", branch}, gitArgs(g)[0]); diff != "" {
+		t.Fatalf("gitArgs(g)[0] (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"commit", "--allow-empty", "-m", "Begin development for " + tag}, gitArgs(g)[1]); diff != "" {
+		t.Fatalf("gitArgs(g)[1] (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"tag", "-f", "--no-sign", tag}, gitArgs(g)[2]); diff != "" {
+		t.Fatalf("gitArgs(g)[2] (-want +got):\n%s", diff)
+	}
 
 	// checkout fails -> wrapped error naming the branch, no further git calls.
 	g2 := fakeRunner(firstTwo, nil, map[string]error{"checkout " + branch: errFake})
 	err := tagWithEmptyCommit(command.Git(g2), branch, tag)
-	require.ErrorContains(t, err, branch)
-	require.Len(t, g2.Calls(), 1)
+	if err == nil || !strings.Contains(err.Error(), branch) {
+		t.Fatalf("err = %v, want it to contain %q", err, branch)
+	}
+	if got := len(g2.Calls()); got != 1 {
+		t.Fatalf("len(g2.Calls()) = %d, want %d", got, 1)
+	}
 }

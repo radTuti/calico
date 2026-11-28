@@ -1562,3 +1562,34 @@ func TestReleaseImages(t *testing.T) {
 		}
 	})
 }
+
+func TestBuilt(t *testing.T) {
+	const ver = "v3.30.0"
+	for _, tc := range []struct {
+		name      string
+		names     []string
+		label     string
+		inspected []string
+		wantErr   bool
+	}{
+		{name: "label matches", names: []string{"node"}, label: ver + "\n", inspected: []string{"quay.io/calico/node:" + ver}},
+		{name: "label differs", names: []string{"node"}, label: "v3.29.0", inspected: []string{"quay.io/calico/node:" + ver}, wantErr: true},
+		{name: "label missing", names: []string{"node"}, label: "<no value>", inspected: []string{"quay.io/calico/node:" + ver}, wantErr: true},
+		{name: "Windows image left out", names: []string{"node-windows", "whisker"}, label: ver, inspected: []string{"quay.io/calico/whisker:" + ver}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &command.Recorder{Reply: func(command.Call) (string, error) { return tc.label, nil }}
+			err := Built(r, ver, []string{"quay.io/calico"}, tc.names)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Built() = %v, want error %v", err, tc.wantErr)
+			}
+			var got []string
+			for _, c := range r.Calls() {
+				got = append(got, c.Args[len(c.Args)-1])
+			}
+			if diff := cmp.Diff(tc.inspected, got); diff != "" {
+				t.Errorf("inspected (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

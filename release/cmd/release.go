@@ -30,7 +30,6 @@ import (
 	"github.com/projectcalico/calico/release/internal/operator"
 	"github.com/projectcalico/calico/release/internal/outputs"
 	"github.com/projectcalico/calico/release/internal/pinnedversion"
-	"github.com/projectcalico/calico/release/internal/plan"
 	"github.com/projectcalico/calico/release/internal/version"
 	"github.com/projectcalico/calico/release/pkg/manager/calico"
 )
@@ -100,17 +99,12 @@ var releaseSubCommands = func(cfg *Config) []*cli.Command {
 				}
 
 				// Configure the builder.
-				opts := []calico.Option{
-					calico.WithRepoRoot(cfg.RepoRootDir),
-					calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
+				opts := append(managerOptions(cfg, c),
 					calico.WithVersion(o.ProductVersion),
-					calico.WithDevTagIdentifier(c.String(devTagSuffixFlag.Name)),
 					calico.WithOperatorImage(operator.Registry(*o), o.Image, o.Version),
 					calico.WithOutputDir(releaseOutputDir(cfg.RepoRootDir, o.ProductVersion)),
 					calico.WithRecordsDir(outputs.RecordsDir(cfg.OutputDir, o.ProductVersion)),
-					calico.WithTmpDir(cfg.TmpDir),
 					calico.WithLogsDir(filepath.Join(cfg.LogsDir, o.ProductVersion)),
-					calico.WithRepo(c.String(orgFlag.Name), c.String(repoFlag.Name), c.String(repoRemoteFlag.Name)),
 					calico.WithImages(c.Bool(imagesFlagName)),
 					calico.WithArchitectures(c.StringSlice(archFlag.Name)),
 					calico.WithImageReleaseDirs(c.StringSlice(imageReleaseDirsFlag.Name)),
@@ -123,19 +117,13 @@ var releaseSubCommands = func(cfg *Config) []*cli.Command {
 					calico.WithTarball(c.Bool(tarballFlag.Name)),
 					calico.WithWindowsArchive(c.Bool(windowsArchiveFlagName)),
 					calico.WithHelmIndex(c.Bool(helmIndexFlagName)),
-					calico.WithValidation(c.Bool(validationFlag.Name)),
 					calico.WithReleaseBranchValidation(c.Bool(branchCheckFlag.Name)),
 					// The operator carries the versions of the images it deploys in its binary, so a
 					// release rebuilds it rather than retagging the one a hashrelease published.
 					calico.WithOperator(operator.Driver{
 						Do: operatorBuild(c, *o, operatorVariants(c), false, filepath.Join(cfg.LogsDir, o.ProductVersion)),
 					}),
-					calico.WithPlanOptions(plan.Options{
-						Preview: c.Bool(planFlag.Name),
-						Local:   c.Bool(localFlag.Name),
-						Skip:    skipSet(c.StringSlice(skipFlagName)),
-					}),
-				}
+				)
 				if reg := c.StringSlice(registryFlag.Name); len(reg) > 0 {
 					opts = append(opts, calico.WithImageRegistries(reg))
 				}
@@ -160,16 +148,12 @@ var releaseSubCommands = func(cfg *Config) []*cli.Command {
 				if err != nil {
 					return fmt.Errorf("operator: %w", err)
 				}
-				opts := []calico.Option{
-					calico.WithRepoRoot(cfg.RepoRootDir),
-					calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
+				opts := append(managerOptions(cfg, c),
 					calico.WithVersion(o.ProductVersion),
 					calico.WithOperatorImage(operator.Registry(*o), o.Image, o.Version),
 					calico.WithOutputDir(releaseOutputDir(cfg.RepoRootDir, o.ProductVersion)),
 					calico.WithRecordsDir(outputs.RecordsDir(cfg.OutputDir, o.ProductVersion)),
-					calico.WithTmpDir(cfg.TmpDir),
 					calico.WithLogsDir(filepath.Join(cfg.LogsDir, o.ProductVersion)),
-					calico.WithRepo(c.String(orgFlag.Name), c.String(repoFlag.Name), c.String(repoRemoteFlag.Name)),
 					calico.WithImages(c.Bool(imagesFlagName)),
 					calico.WithImageReleaseDirs(c.StringSlice(imageReleaseDirsFlag.Name)),
 					calico.WithHelmCharts(c.Bool(helmChartsFlagName)),
@@ -177,18 +161,12 @@ var releaseSubCommands = func(cfg *Config) []*cli.Command {
 					calico.WithGitRef(c.Bool(gitRefFlag.Name)),
 					calico.WithGithubRelease(c.Bool(githubReleaseFlag.Name)),
 					calico.WithDraftRelease(c.Bool(draftGithubReleaseFlag.Name)),
-					calico.WithValidation(c.Bool(validationFlag.Name)),
 					calico.WithReleaseBranchValidation(c.Bool(branchCheckFlag.Name)),
 					calico.WithOperator(operator.Driver{
 						Do:   operatorPublish(c, *o, operatorVariants(c), false, outputs.RecordsDir(cfg.OutputDir, o.ProductVersion), filepath.Join(cfg.LogsDir, o.ProductVersion)),
 						Done: operatorPublished(c, *o, operatorVariants(c), outputs.RecordsDir(cfg.OutputDir, o.ProductVersion)),
 					}),
-					calico.WithPlanOptions(plan.Options{
-						Preview: c.Bool(planFlag.Name),
-						Local:   c.Bool(localFlag.Name),
-						Skip:    skipSet(c.StringSlice(skipFlagName)),
-					}),
-				}
+				)
 				if reg := c.StringSlice(registryFlag.Name); len(reg) > 0 {
 					opts = append(opts, calico.WithImageRegistries(reg))
 				}
@@ -196,7 +174,7 @@ var releaseSubCommands = func(cfg *Config) []*cli.Command {
 				if err != nil {
 					return err
 				}
-				opts = append(opts, calico.WithComponents(pin.Released()), calico.WithReleaseImages(cfg.ReleaseImages))
+				opts = append(opts, calico.WithComponents(pin.Released()))
 				if reg := c.StringSlice(helmRegistryFlag.Name); len(reg) > 0 {
 					opts = append(opts, calico.WithHelmRegistries(reg))
 				}
@@ -227,55 +205,37 @@ func releasePrepCommand(cfg *Config) *cli.Command {
 		branchCheckFlag,
 		validationFlag,
 		localFlag,
+		planFlag,
+		skipFlag(calico.PrepSteps()),
 	)
 	return &cli.Command{
 		Name:  "prep",
 		Usage: "Prepare for a Calico release",
 		Flags: flags,
-		Action: withLogging(withSummary(cfg, "release-prep", func(_ context.Context, c *cli.Command) (string, map[string]any, error) {
-			// Determine the versions to use for the release.
+		Action: withLogging(func(_ context.Context, c *cli.Command) error {
 			gitVer, err := version.GitVersion(commandRunner)
 			if err != nil {
-				return "", nil, err
+				return err
 			}
 			ver, err := version.DetermineReleaseVersion(gitVer, c.String(devTagSuffixFlag.Name))
 			if err != nil {
-				return "", nil, err
+				return err
 			}
-			outs := map[string]any{
-				"version": ver.String(),
-			}
-			operatorVer := ver.String()
-			outs["operator"] = operatorVer
-
-			// Generate release notes
-			if _, err := outputs.ReleaseNotes(github.Client(commandRunner), c.String(orgFlag.Name), cfg.RepoRootDir, "", ver); err != nil {
-				return ver.String(), outs, fmt.Errorf("generate release notes: %w", err)
-			}
-
-			// Prepare the release using the manager.
-			opts := []calico.Option{
-				calico.WithRepoRoot(cfg.RepoRootDir),
-				calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
+			opts := append(managerOptions(cfg, c),
 				calico.WithVersion(ver.String()),
-				calico.WithOperatorVersion(operatorVer),
-				calico.WithRepo(c.String(orgFlag.Name), c.String(repoFlag.Name), c.String(repoRemoteFlag.Name)),
-				calico.WithTmpDir(cfg.TmpDir),
-				calico.WithValidation(c.Bool(validationFlag.Name)),
+				calico.WithOperatorVersion(ver.String()),
 				calico.WithReleaseBranchValidation(c.Bool(branchCheckFlag.Name)),
-				calico.WithPlanOptions(plan.Options{Local: c.Bool(localFlag.Name)}),
-			}
+				calico.WithReleaseNotes(true),
+			)
 			r, err := calico.NewManager(opts...)
 			if err != nil {
-				return ver.String(), outs, fmt.Errorf("calico manager: %w", err)
+				return fmt.Errorf("calico manager: %w", err)
 			}
-			branch, err := r.PrepareRelease()
-			if err != nil {
-				return ver.String(), outs, fmt.Errorf("prepare release: %w", err)
+			if err := r.PrepareRelease(); err != nil {
+				return fmt.Errorf("prepare release: %w", err)
 			}
-			outs["branch"] = branch
-			return ver.String(), outs, nil
-		})),
+			return nil
+		}),
 	}
 }
 

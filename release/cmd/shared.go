@@ -23,7 +23,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/snowzach/rotatefilehook"
@@ -33,9 +32,11 @@ import (
 	"github.com/projectcalico/calico/release/internal/manifests"
 	"github.com/projectcalico/calico/release/internal/outputs"
 	"github.com/projectcalico/calico/release/internal/pinnedversion"
+	"github.com/projectcalico/calico/release/internal/plan"
 	"github.com/projectcalico/calico/release/internal/registry"
 	"github.com/projectcalico/calico/release/internal/slack"
 	"github.com/projectcalico/calico/release/internal/version"
+	"github.com/projectcalico/calico/release/pkg/manager/calico"
 )
 
 const releaseDirName = "release"
@@ -96,40 +97,6 @@ func withLogging(action cli.ActionFunc) cli.ActionFunc {
 		logFileName := strings.ReplaceAll(cmdName, " ", "-") + ".log"
 		configureLogging(logFileName)
 		return action(ctx, c)
-	}
-}
-
-// SummaryAction is a command action that returns a version string,
-// structured outputs, and an error. The version identifies the summary
-// file path. Outputs are included in the summary YAML.
-type SummaryAction func(context.Context, *cli.Command) (string, map[string]any, error)
-
-// withSummary wraps a SummaryAction with timing, status, and summary file
-// emission. The step name identifies the summary file (e.g. "release-prep").
-// Summary write failures are logged but never mask the action error.
-func withSummary(cfg *Config, step string, action SummaryAction) cli.ActionFunc {
-	return func(ctx context.Context, c *cli.Command) error {
-		started := time.Now()
-		ver, outputsMap, actionErr := action(ctx, c)
-
-		status := "success"
-		if actionErr != nil {
-			status = "failure"
-		}
-		if ver == "" {
-			ver = "unknown"
-		}
-		summary := outputs.StepSummary{
-			Status:    status,
-			Started:   started,
-			Completed: time.Now(),
-			Outputs:   outputsMap,
-		}
-		outputDir := outputs.SummaryOutputDir(cfg.RepoRootDir)
-		if err := outputs.WriteSummary(outputDir, ver, step, summary); err != nil {
-			logrus.WithError(err).Warn("Failed to write summary file")
-		}
-		return actionErr
 	}
 }
 
@@ -251,4 +218,28 @@ func recordsDir(cfg *Config, c *cli.Command, pin pinned, version string) (string
 		return "", err
 	}
 	return outputs.RecordsDir(cfg.OutputDir, p.Hash), nil
+}
+
+func skipSet(ss []string) map[string]bool {
+	out := make(map[string]bool, len(ss))
+	for _, s := range ss {
+		out[s] = true
+	}
+	return out
+}
+
+func managerOptions(cfg *Config, c *cli.Command) []calico.Option {
+	return []calico.Option{
+		calico.WithRepoRoot(cfg.RepoRootDir),
+		calico.WithTmpDir(cfg.TmpDir),
+		calico.WithRepo(c.String(orgFlag.Name), c.String(repoFlag.Name), c.String(repoRemoteFlag.Name)),
+		calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
+		calico.WithDevTagIdentifier(c.String(devTagSuffixFlag.Name)),
+		calico.WithValidation(c.Bool(validationFlag.Name)),
+		calico.WithPlanOptions(plan.Options{
+			Preview: c.Bool(planFlag.Name),
+			Local:   c.Bool(localFlag.Name),
+			Skip:    skipSet(c.StringSlice(skipFlagName)),
+		}),
+	}
 }

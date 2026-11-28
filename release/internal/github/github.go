@@ -149,3 +149,29 @@ func resolveToken(r command.CommandRunner) string {
 	// Fallback to anonymous request if no credentials could be recovered
 	return ""
 }
+
+// OwnerFromRemoteURL extracts the GitHub owner (org or user) from a git remote URL.
+// Supports SSH (git@github.com:owner/repo.git),
+// HTTPS (https://github.com/owner/repo.git), and variants without .git suffix.
+func OwnerFromRemoteURL(raw string) (string, error) {
+	raw = strings.TrimSuffix(raw, ".git")
+
+	// SSH: git@github.com:owner/repo
+	if i := strings.Index(raw, ":"); i >= 0 && !strings.Contains(raw[:i], "/") {
+		parts := strings.Split(raw[i+1:], "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2], nil
+		}
+		return "", fmt.Errorf("unable to determine owner from remote URL %q", raw)
+	}
+
+	// HTTPS: https://github.com/owner/repo — require scheme prefix.
+	if strings.Contains(raw, "://") {
+		parts := strings.Split(raw, "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2], nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to determine owner from remote URL %q", raw)
+}
