@@ -124,7 +124,18 @@ func TestRun(t *testing.T) {
 				name:    "a skipped requirement whose own requirement runs fails as stale",
 				opts:    Options{Skip: map[string]bool{"b": true}},
 				nodes:   []Node{{Name: "a", Do: noop}, {Name: "b", Requires: []string{"a"}, Do: noop, Done: noop}, {Name: "c", Requires: []string{"b"}, Do: noop}},
-				wantErr: `node "c" requires "b", which is off but would be stale: it requires "a", which runs in this run`,
+				wantErr: `node "c" requires "b", which is off but would be stale: it depends on "a", which runs in this run`,
+			},
+			{
+				name: "a requirement that runs behind two skipped nodes fails as stale",
+				opts: Options{Skip: map[string]bool{"b": true, "c": true}},
+				nodes: []Node{
+					{Name: "a", Do: noop},
+					{Name: "b", Requires: []string{"a"}, Do: noop, Done: noop},
+					{Name: "c", Requires: []string{"b"}, Do: noop, Done: noop},
+					{Name: "d", Requires: []string{"c"}, Do: noop},
+				},
+				wantErr: `node "d" requires "c", which is off but would be stale: it depends on "a", which runs in this run`,
 			},
 			{
 				name:  "a dry run does not check a skipped requirement",

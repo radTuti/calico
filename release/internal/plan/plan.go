@@ -32,7 +32,7 @@ type Node struct {
 	When func() bool
 
 	// Requires names nodes that must be done first: on and earlier, or off
-	// with a passing Done and no requirement on in this run.
+	// with a passing Done and nothing it depends on running in this run.
 	Requires []string
 
 	// Validate runs for every node that is on, before any node's Do.
@@ -125,7 +125,7 @@ func (p *Plan) Run() (err error) {
 			case !p.on[req] && r.Done == nil:
 				reqErr = fmt.Errorf("node %q requires %q, which is off in this run", n.Name, req)
 			case !p.on[req] && p.onRequirement(r) != "":
-				reqErr = fmt.Errorf("node %q requires %q, which is off but would be stale: it requires %q, which runs in this run", n.Name, req, p.onRequirement(r))
+				reqErr = fmt.Errorf("node %q requires %q, which is off but would be stale: it depends on %q, which runs in this run", n.Name, req, p.onRequirement(r))
 			// A dry run reaches no remote, so it has nothing to check against.
 			case !p.on[req] && p.opts.Local:
 			case !p.on[req]:
@@ -216,11 +216,22 @@ func (p *Plan) Run() (err error) {
 	return nil
 }
 
+// onRequirement walks through off requirements: an on node further back still
+// rewrites what they left behind.
 func (p *Plan) onRequirement(n Node) string {
-	for _, req := range n.Requires {
+	seen := map[string]bool{}
+	queue := slices.Clone(n.Requires)
+	for len(queue) > 0 {
+		req := queue[0]
+		queue = queue[1:]
+		if seen[req] {
+			continue
+		}
+		seen[req] = true
 		if p.on[req] {
 			return req
 		}
+		queue = append(queue, p.named[req].Requires...)
 	}
 	return ""
 }

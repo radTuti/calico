@@ -71,7 +71,8 @@ named nodes (`internal/plan`). Every node validates before any node runs, a
 failure rolls back the finished nodes newest first, and a node runs only once
 the nodes it `Requires` are done: earlier in this run, or, when off, by an
 earlier run its `Done` check confirms. An off node is stale, not done, when a
-node it requires runs in this run. Outside `--local`, a node's `Done` must also
+node it requires, directly or through other off nodes, runs in this run.
+Outside `--local`, a node's `Done` must also
 pass straight after its own `Do`; under `--local` no `Done` runs. `--plan` lists
 the nodes and runs only their checks, warning on a failure rather than exiting.
 The manager predates the step packages and still does some work itself.
