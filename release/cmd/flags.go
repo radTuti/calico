@@ -181,17 +181,20 @@ var (
 			if b {
 				return nil
 			}
-			if c.Bool(branchCheckFlagName) {
-				return fmt.Errorf("--%s must be set when --%s is set", inverseFlagName(branchCheckFlagName), inverseFlagName(validationFlagName))
-			}
-			// image-scan is only registered on publish commands; only enforce the
-			// dependency where the flag actually exists.
-			if hasFlag(c, imageScanFlagName) && c.Bool(imageScanFlagName) {
-				return fmt.Errorf("--%s must be set when --%s is set", inverseFlagName(imageScanFlagName), inverseFlagName(validationFlagName))
+			for _, name := range subValidationFlags {
+				if !hasFlag(c, name) || !c.Bool(name) {
+					continue
+				}
+				// Setting the --no- form keeps an explicit --<name> an error, as on
+				// the command line.
+				if err := c.Set(inverseFlagName(name), "true"); err != nil {
+					return fmt.Errorf("--%s turns off --%s: %w", inverseFlagName(validationFlagName), name, err)
+				}
 			}
 			return nil
 		},
 	}
+	subValidationFlags = []string{branchCheckFlagName, imageScanFlagName}
 	branchCheckFlagName = "branch-check"
 	branchCheckFlag     = &cli.BoolWithInverseFlag{
 		Name:     branchCheckFlagName,

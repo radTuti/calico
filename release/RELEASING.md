@@ -303,7 +303,7 @@ variables shown beside it. The ones a hashrelease run most often needs:
 - `--images`: images are off by default for a hashrelease. Add this to build and
   publish them.
 - `--no-validation`: skips checks a CI run needs, such as being on a release
-  branch.
+  branch. It also turns off `--branch-check` and `--image-scan`.
 - `--no-publish-to-hashrelease-server`: the server is on by default. Add this
   unless you are publishing to it, which also needs
   `--hashrelease-server-bucket`.
@@ -337,7 +337,7 @@ Commands run from `release/`, after `make build`.
    ./bin/release hashrelease publish --no-validation --images \
      --registry <YOUR REGISTRY> --operator-registry <YOUR REGISTRY> \
      --helm-registry <YOUR HELM REGISTRY> \
-     --no-publish-to-hashrelease-server --no-image-scan
+     --no-publish-to-hashrelease-server
    ```
 
 ## Dry runs with `--local`

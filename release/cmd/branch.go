@@ -50,6 +50,7 @@ var (
 		devTagSuffixFlag,
 		localFlag,
 		validationFlag,
+		branchCheckFlag,
 		planFlag,
 		skipFlag(calico.CutSteps()),
 	}
@@ -60,6 +61,7 @@ var (
 			calicoManager, err := calico.NewManager(append(
 				managerOptions(cfg, c),
 				calico.WithMainBranch(c.String(mainBranchFlag.Name)),
+				calico.WithReleaseBranchValidation(c.Bool(branchCheckFlag.Name)),
 			)...)
 			if err != nil {
 				return fmt.Errorf("calico manager: %w", err)

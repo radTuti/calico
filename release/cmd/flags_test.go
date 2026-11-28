@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	cli "github.com/urfave/cli/v3"
 
 	"github.com/projectcalico/calico/release/internal/command"
@@ -65,30 +66,38 @@ func assertRun(t *testing.T, flags []cli.Flag, args []string, wantErr string) {
 
 func TestValidationFlagAction(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name  string
+		flags []cli.Flag
+		args  []string
+		want  map[string]bool
 	}{
-		{"defaults pass", nil, ""},
-		{"--no-validation alone errors (default branch-check=true)", []string{"--no-validation"}, "--no-branch-check must be set"},
-		{"--no-validation --no-branch-check but image-scan default true errors", []string{"--no-validation", "--no-branch-check"}, "--no-image-scan must be set"},
-		{"all three negated passes", []string{"--no-validation", "--no-branch-check", "--no-image-scan"}, ""},
-		{"--no-branch-check alone passes (dependent disabled, prerequisite still on)", []string{"--no-branch-check"}, ""},
-		{"--no-image-scan alone passes", []string{"--no-image-scan"}, ""},
+		{"defaults keep every check on", []cli.Flag{validationFlag, branchCheckFlag, imageScanFlag}, nil, map[string]bool{validationFlagName: true, branchCheckFlagName: true, imageScanFlagName: true}},
+		{"--no-validation turns off branch-check and image-scan", []cli.Flag{validationFlag, branchCheckFlag, imageScanFlag}, []string{"--no-validation"}, map[string]bool{validationFlagName: false, branchCheckFlagName: false, imageScanFlagName: false}},
+		{"--no-validation with checks already off", []cli.Flag{validationFlag, branchCheckFlag, imageScanFlag}, []string{"--no-validation", "--no-branch-check", "--no-image-scan"}, map[string]bool{validationFlagName: false, branchCheckFlagName: false, imageScanFlagName: false}},
+		{"--no-branch-check leaves validation on", []cli.Flag{validationFlag, branchCheckFlag, imageScanFlag}, []string{"--no-branch-check", "--no-image-scan"}, map[string]bool{validationFlagName: true, branchCheckFlagName: false, imageScanFlagName: false}},
+		{"--no-validation without image-scan registered", []cli.Flag{validationFlag, branchCheckFlag}, []string{"--no-validation"}, map[string]bool{validationFlagName: false, branchCheckFlagName: false}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assertRun(t, []cli.Flag{validationFlag, branchCheckFlag, imageScanFlag}, tc.args, tc.wantErr)
+			got := map[string]bool{}
+			cmd := &cli.Command{
+				Name:  "test",
+				Flags: tc.flags,
+				Action: func(_ context.Context, c *cli.Command) error {
+					for name := range tc.want {
+						got[name] = c.Bool(name)
+					}
+					return nil
+				},
+			}
+			if err := cmd.Run(context.Background(), append([]string{"test"}, tc.args...)); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("flag values (-want +got):\n%s", diff)
+			}
 		})
 	}
-}
-
-// TestValidationFlagActionWithoutImageScan covers the build-side case where
-// imageScanFlag isn't registered. validationFlag.Action must skip the
-// image-scan dependency check rather than misfire.
-func TestValidationFlagActionWithoutImageScan(t *testing.T) {
-	flags := []cli.Flag{validationFlag, branchCheckFlag}
-	assertRun(t, flags, []string{"--no-validation", "--no-branch-check"}, "")
 }
 
 func TestHelmChartsFlagAction(t *testing.T) {
